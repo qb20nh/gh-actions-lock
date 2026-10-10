@@ -1,0 +1,103 @@
+name: M6 malformed lock workarounds
+
+on:
+  push:
+    branches:
+      - codex/m6/workaround-*
+
+permissions:
+  contents: read
+
+jobs:
+  validate-lock:
+    name: Validate with an action-free job
+    if: github.repository == 'qb20nh/gh-actions-lock'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      M6_VERIFIER_SHA: 34c65ecf262f580f066bf1d105a2ecc310226374
+      M6_WORKFLOW_SHA: ${{ github.workflow_sha }}
+    steps:
+      - name: Build the immutable trusted verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/m6-verifier"
+          gh api "repos/${GITHUB_REPOSITORY}/tarball/${M6_VERIFIER_SHA}" > "$RUNNER_TEMP/m6-verifier.tar.gz"
+          tar -xzf "$RUNNER_TEMP/m6-verifier.tar.gz" --strip-components=1 -C "$RUNNER_TEMP/m6-verifier"
+          cd "$RUNNER_TEMP/m6-verifier"
+          GOTOOLCHAIN=auto go build -mod=readonly -p=4 -o "$RUNNER_TEMP/m6-verify" ./cmd/gh-actions-lock
+      - name: Verify the exact workflow revision as data
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$M6_WORKFLOW_SHA" = "$GITHUB_SHA"
+          mkdir -p "$RUNNER_TEMP/m6-candidate"
+          gh api "repos/${GITHUB_REPOSITORY}/tarball/${M6_WORKFLOW_SHA}" > "$RUNNER_TEMP/m6-candidate.tar.gz"
+          tar -xzf "$RUNNER_TEMP/m6-candidate.tar.gz" --strip-components=1 -C "$RUNNER_TEMP/m6-candidate"
+          cd "$RUNNER_TEMP/m6-candidate"
+          git init -q
+          for m6_path in .github .github/workflows .github/workflows/actions.lock .github/workflows/m6-workarounds.yml; do
+            test ! -L "$m6_path"
+          done
+          test -f .github/workflows/actions.lock
+          test -s .github/workflows/actions.lock
+          test -f .github/workflows/m6-workarounds.yml
+          "$RUNNER_TEMP/m6-verify" --hostname github.com --verify-local --json=valid,findings \
+            .github/workflows/m6-workarounds.yml > "$RUNNER_TEMP/m6-verification.json"
+          jq -e '.valid == true' "$RUNNER_TEMP/m6-verification.json"
+          printf 'M6_ACTION_FREE_GATE_PASSED=%s\n' "$M6_WORKFLOW_SHA"
+
+  gated-consumer:
+    needs: validate-lock
+    if: needs.validate-lock.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Consumer execution sentinel
+        run: echo M6_GATED_CONSUMER_EXECUTED
+      - uses: qb20nh/transition-test/test/runtime/actions/mutable-child-wrapper@93652f3e19efae7f268e56fc64dc774af069a02e
+        with:
+          expected-marker: gh-actions-lock-runtime-leaf-v1
+
+  ungated-sha-action:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: qb20nh/transition-test/test/runtime/actions/wrapper@38a3e6df964dfe1756abb8dec154228d7140a841
+        with:
+          expected-marker: gh-actions-lock-runtime-leaf-v1
+
+  ungated-sha-parent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: qb20nh/transition-test/test/runtime/actions/mutable-child-wrapper@93652f3e19efae7f268e56fc64dc774af069a02e
+        with:
+          expected-marker: ${{ contains(github.ref, 'workaround-syntax-') && 'gh-actions-lock-runtime-leaf-v2' || 'gh-actions-lock-runtime-leaf-v1' }}
+
+  confirm-results:
+    needs: [validate-lock, gated-consumer, ungated-sha-action, ungated-sha-parent]
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      M6_GATE_RESULT: ${{ needs.validate-lock.result }}
+      M6_CONSUMER_RESULT: ${{ needs.gated-consumer.result }}
+      M6_DIRECT_RESULT: ${{ needs.ungated-sha-action.result }}
+      M6_PARENT_RESULT: ${{ needs.ungated-sha-parent.result }}
+    steps:
+      - shell: bash
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF" in
+            refs/heads/codex/m6/workaround-syntax-*)
+              test "$M6_GATE_RESULT" = failure
+              test "$M6_CONSUMER_RESULT" = skipped
+              ;;
+            refs/heads/codex/m6/workaround-valid-*)
+              test "$M6_GATE_RESULT" = success
+              test "$M6_CONSUMER_RESULT" = success
+              ;;
+            *) exit 1 ;;
+          esac
+          test "$M6_DIRECT_RESULT" = success
+          test "$M6_PARENT_RESULT" = success
+          printf 'M6_WORKAROUND_EXPECTATIONS_CONFIRMED\n'
