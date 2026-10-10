@@ -794,8 +794,9 @@ scenarios:
 
   - name: verify_local_conflict_relock
     category: output_modes
-    description: "--verify-local --relock is rejected — verify-local is offline"
+    description: "Compiled binary parses --verify-local --relock and exits 2 before workflow processing; Go tests check the option validator directly"
     needs_stub: false
+    tags: [stub]
     flags: ["--verify-local", "--relock"]
     fixtures:
       workflows:
@@ -803,7 +804,8 @@ scenarios:
           name: CI
           actions: ["actions/checkout@v4"]
     expect:
-      exit: 1
+      exit: 2
+      exit_any: [2]
       output_contains: ["offline"]
 
   # ╔═════════════════════════════════════════════════════════════════════════╗

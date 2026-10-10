@@ -17,6 +17,19 @@ const (
 	parityMoved = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 )
 
+func TestBuildPinCheckQueryRequiresCommitObjects(t *testing.T) {
+	query, variables := buildPinCheckQuery([]PinCheck{
+		{Owner: "o", Repo: "r", SHA: paritySHA},
+		{Owner: "o", Repo: "r", SHA: parityMoved, Tag: "v1.2.3"},
+	})
+	for i := range 2 {
+		assert.Regexp(t, fmt.Sprintf(`commit:\s*object\(oid:\s*\$oid%d\)\s*\{\s*\.\.\.\s+on\s+Commit\s*\{\s*oid\s*\}`, i), query)
+	}
+	assert.Regexp(t, `tag:\s*object\(expression:\s*\$tag1\)\s*\{\s*\.\.\.\s+on\s+Commit\s*\{\s*oid\s*\}`, query)
+	assert.NotContains(t, variables, "tag0", "mutable pins check the commit without peeling a tag")
+	assert.Equal(t, "v1.2.3^{commit}", variables["tag1"], "annotated version tags must still peel to their commit")
+}
+
 func TestCheckPins_GraphQLParsesEachState(t *testing.T) {
 	reg := &httpmock.Registry{}
 	defer reg.Verify(t)

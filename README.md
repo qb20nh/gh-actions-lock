@@ -42,9 +42,10 @@ When no workflows remain, confirming corrupt-lock recovery during a full scan
 removes the obsolete lockfile through the normal guarded commit path.
 
 Locked pins are sticky: a normal run only re-resolves refs the lockfile does
-not record yet. It checks repository identity, commit existence, and whether
-full-version tags (e.g. `v4.2.1`) still point at the recorded commit, including
-transitive pins, including full-SHA uses covered by symbolic lock keys. A verified
+not record yet. It checks repository identity, that pinned object IDs identify
+commits, and whether full-version tags (e.g. `v4.2.1`) still point at the recorded
+commit. These checks include transitive pins and full-SHA uses covered by
+symbolic lock keys. A verified
 direct rename or transfer can update the repository name while preserving its
 commit. Read-only verification rejects old names because
 [GitHub Actions does not support redirects](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/find-and-customize-actions);

@@ -136,11 +136,11 @@ func buildPinCheckQuery(pins []PinCheck) (string, map[string]any) {
 		fmt.Fprintf(&decl, "$owner%d: String!, $name%d: String!, $oid%d: GitObjectID!", i, i, i)
 		fmt.Fprintf(&body, " a%d: repository(owner: $owner%d, name: $name%d) {", i, i, i)
 		body.WriteString(" nameWithOwner databaseId owner { ... on Organization { databaseId } ... on User { databaseId } }")
-		fmt.Fprintf(&body, " commit: object(oid: $oid%d) { oid }", i)
+		fmt.Fprintf(&body, " commit: object(oid: $oid%d) { ... on Commit { oid } }", i)
 		if p.Tag != "" {
 			vars[fmt.Sprintf("tag%d", i)] = p.Tag + "^{commit}"
 			fmt.Fprintf(&decl, ", $tag%d: String!", i)
-			fmt.Fprintf(&body, " tag: object(expression: $tag%d) { oid }", i)
+			fmt.Fprintf(&body, " tag: object(expression: $tag%d) { ... on Commit { oid } }", i)
 		}
 		body.WriteString(" }")
 	}

@@ -150,6 +150,16 @@ reproduced before its fix. Formatting, vet, the complete race/release suite,
 five materializer tests, 14 protection/hook tests, and all 34 stub scenarios pass.
 [Local review log](/workspace/.cloud-setup/gh-actions-lock/review-p1-p2-checks.log).
 
+The commit-object follow-up constrains GraphQL parity lookups to `Commit`
+objects. [Command regressions](../cmd/gh-actions-lock/parity_object_test.go)
+reject blob, tree, and tag IDs for mutable refs without changing files, while
+valid commits and version-tag peeling remain supported. These regressions
+failed before the fix. The relock-conflict catalog scenario now belongs to the
+required stub suite and asserts the compiled binary's bad-flag exit code of 2;
+the Go test covers the option validator directly. Formatting, vet, the full
+race/release suite, five materializer tests, 14 protection/hook tests, and all
+35 stub scenarios pass. [Local follow-up log](/workspace/.cloud-setup/gh-actions-lock/review-object-pin-checks.log).
+
 | Check | Result | Local execution log |
 | --- | --- | --- |
 | `make test` | Release tag selection/verification and `go test -race -count=1 ./...` pass. | [Race/release log](/workspace/.cloud-setup/gh-actions-lock/goal-final-test.log) |
