@@ -4,10 +4,10 @@ Deliver reviewable fixes so verification reports dependency coverage accurately,
 
 - **Repository:** [github/gh-actions-lock](https://github.com/github/gh-actions-lock)
 - **Assessment baseline:** `3f7c302310dde7556291a2ce0792de36ec41a4c8`
-- **Status:** CLI implementation and the repository-controlled #125 workaround combo are implemented and tested. M6 remains open for upstream runtime rejection and deployment of repository protections.
+- **Status:** CLI implementation and the repository-controlled #125 workaround are merged into the fork and tested. Default-branch validation, actual PR events, the merged-source draft release, and four required GitHub Actions checks with strict branch freshness are proven. Full-SHA policy and the allowlist are owner-confirmed. M6 remains open for Actions administration readback and upstream runtime rejection.
 - **Progress:** 5 of 6 milestones complete.
 - **Last validated:** 2026-10-11 KST.
-- **Delivery:** [Implementation PR](https://github.com/qb20nh/gh-actions-lock/pull/2), [workaround branch](https://github.com/qb20nh/gh-actions-lock/tree/codex/m6/combo-20261011), [published release evidence](https://github.com/qb20nh/gh-actions-lock/tree/codex/m6/evidence-combo-20261011), and 12 attested draft prerelease binaries from `a23bb9b0d13aad17565ca53d8436f6959acaff6b`. Upstream merge remains separate.
+- **Delivery:** [Merged implementation PR](https://github.com/qb20nh/gh-actions-lock/pull/2), fork main `2169abe6e476bdf58aa32105efcc2a2792fc92b3`, [12 attested draft binaries from that merged source](https://github.com/qb20nh/gh-actions-lock/releases/tag/untagged-88bcef74c4ff66093ea3), and [post-merge validation evidence](../test/runtime/evidence/2026-10-11-postmerge.md). Earlier candidate evidence remains recorded below. Upstream merge and stable publication are separate.
 - **Execution order:** M1 → M2 → M3 → M4 → M5 → M6.
 
 ## Milestones
@@ -86,6 +86,10 @@ Deliver reviewable fixes so verification reports dependency coverage accurately,
 
   **Runtime validation:** The [runtime workflow](../test/runtime/workflows/m6-runtime.yml) [passed](https://github.com/qb20nh/gh-actions-lock/actions/runs/38056833390) same-repository actions, foreign actions, nested foreign reusable workflows with a poisoned caller checkout, and a symbolic ref whose live marker differs from its recorded pin. The hosted runner was `2.337.0`, Ubuntu `24.04.5`, image `20261004.327.1`. Marker and source-path assertions establish binding to the defining repository. The divergent-ref job announces locked versions and downloads the recorded `38a3e6d` commit despite the branch pointing to `7e72f65`.
 
+  **Post-merge validation:** [Merged-source CI](https://github.com/qb20nh/gh-actions-lock/actions/runs/38072869871) passed all checks, including 35 stub and 103 live scenarios. Actual `pull_request_target` delivery succeeded on both head and merge commits for a valid lock, failed both for malformed YAML with all CI/dependency-review consumers skipped, and succeeded after restoration. [Fixture PR #3](https://github.com/qb20nh/gh-actions-lock/pull/3) is closed without merging. [Post-merge evidence](../test/runtime/evidence/2026-10-11-postmerge.md) records exact sources, revisions, runs, and remaining settings.
+
+  **Merged-source release:** [Build 38073256994](https://github.com/qb20nh/gh-actions-lock/actions/runs/38073256994) produced 12 attested draft binaries from `2169abe6e476bdf58aa32105efcc2a2792fc92b3`; the annotated tag resolves to that exact commit. [Uploaded-binary smoke 38073725827](https://github.com/qb20nh/gh-actions-lock/actions/runs/38073725827) verified the Linux digest, hosted build attestation and source commit, execution, frozen graph, and missing-lock rejection. [Asset evidence](../test/runtime/evidence/2026-10-11-release-assets.json) records all 12 digests and attestation IDs. The release remains a draft prerelease.
+
   **Provider:** An isolated [fixture branch](https://github.com/qb20nh/transition-test/tree/codex/m6-gh-actions-lock-fixtures-20261010) records marker `v1` at [38a3e6d](https://github.com/qb20nh/transition-test/commit/38a3e6df964dfe1756abb8dec154228d7140a841); its live ref advances to marker `v2` at [7e72f65](https://github.com/qb20nh/transition-test/commit/7e72f651cfb3ae0aba09f652b96b1efda2454d5b). The caller lock retains `v1` for the divergent-ref test. Default branches are outside this test's mutation scope.
 
   **Remaining release gate:** A [committed syntactically malformed lock](https://github.com/qb20nh/gh-actions-lock/actions/runs/38056912627) was ignored, and `M6_LOCK_SENTINEL_EXECUTED` ran. This reproduces #125 and keeps M6 open. A [dangling-edge lock](https://github.com/qb20nh/gh-actions-lock/actions/runs/38056929771) was rejected at startup with an explicit `Invalid lockfile` annotation and no jobs. Re-run the syntax-negative control after the upstream service fix; completion requires a lock-specific rejection before the sentinel executes. [Recorded evidence](../test/runtime/evidence/2026-10-10.md) links all commits, runs, and assertions.
@@ -103,7 +107,14 @@ Deliver reviewable fixes so verification reports dependency coverage accurately,
   - [x] Prepare CODEOWNERS, an exact SHA allowlist, and an idempotent administration script preserving existing protections.
   - [x] Validate real PR head and merge status binding through the hosted policy-script harness; all 103 scenarios pass in the corrected live catalog.
   - [x] Build 12 attested binaries through the vendored composite and verify the uploaded Linux binary's digest, source attestation, frozen graph and missing-lock rejection.
-  - [ ] Deploy the policy on the default branch, verify actual PRtarget and merge-group delivery, and apply required checks, SHA policy, and exact allowlist with an administration credential. Current connector/shell capabilities cannot apply settings.
+  - [x] Deploy the policy on the default branch and prove actual PRtarget head/merge status binding with valid, malformed, and restored controls.
+  - [x] Confirm default-branch protection exists: active ruleset `protect` (ID `24848059`) prevents deletion/force pushes and requires PRs, with no bypass.
+  - [x] Require `Lock policy`, `go-test`, `integration-stub`, and `dependency-review` from GitHub Actions (app `15368`): ruleset API readback confirms all four, no bypass, and no branch-creation exception.
+  - [x] Enable strict up-to-date checks in that ruleset: API readback confirms `strict_required_status_checks_policy: true`, with all four checks retained and no bypass or branch-creation exception.
+  - [x] Enable full-SHA action policy: the user confirms **Require actions to be pinned to a full-length commit SHA** is checked. Administration API readback remains unavailable.
+  - [x] Enable the exact eight-entry allowlist: the user confirms the supplied policy was saved. Administration API readback remains unavailable.
+  - [ ] Inspect applicable workflow-event policy and read back Actions settings. Current connector/shell capabilities cannot administer or inspect these settings.
+  - Hosted merge-group delivery is not applicable to this personal fork; GitHub requires an eligible organization repository. Retain the handler and require every check to handle merge groups before enabling a queue elsewhere.
   - [x] Confirm the fork's dependency-review API is available: the [rerun](https://github.com/qb20nh/gh-actions-lock/actions/runs/38066247251) passed both its lock gate and dependency review after the initial 403.
   - [ ] Re-run platform malformed-lock rejection after the upstream #125 fix; require an explicit lock error and no execution sentinel.
 
@@ -166,7 +177,7 @@ race/release suite, five materializer tests, 14 protection/hook tests, and all
 | `make vet` | Pass. | [Vet log](/workspace/.cloud-setup/gh-actions-lock/goal-final-vet.log) |
 | `make fmt-check` | Pass. | Re-run with the prepared toolchain. |
 | `git diff --check` and `git diff --cached --check` | Pass. | No whitespace errors. |
-| `make test-stub` | 34 passed, 0 failed. | [Stub integration log](/workspace/.cloud-setup/gh-actions-lock/goal-final-stub.log) |
+| `make test-stub` | 35 passed, 0 failed. | [Stub integration log](/workspace/.cloud-setup/gh-actions-lock/review-object-pin-checks.log) |
 
 Hosted required checks and runtime smoke results are recorded in the [M6 evidence report](../test/runtime/evidence/2026-10-10.md). M6 remains open because the service ignored a syntactically malformed lock; no required CLI test failure remains.
 

@@ -1,0 +1,71 @@
+{
+  "source_sha": "2169abe6e476bdf58aa32105efcc2a2792fc92b3",
+  "tag_object_sha": "9aa942aba2a3a3764d473feb9f64fd0e19a1de03",
+  "release_id": 409109569,
+  "release_tag": "m6-2169abe6e476bdf58aa32105efcc2a2792fc92b3",
+  "release_url": "https://github.com/qb20nh/gh-actions-lock/releases/tag/untagged-88bcef74c4ff66093ea3",
+  "build_run_id": 38073256994,
+  "smoke_run_id": 38073725827,
+  "artifacts": [
+    {
+      "name": "darwin-amd64",
+      "digest": "sha256:bd1dd56a88d6d67cc6fe17fad00483c1ea2f58a32d95b4997b4de5163262cc2b",
+      "attestation_id": 54650380
+    },
+    {
+      "name": "darwin-arm64",
+      "digest": "sha256:89dedc571aa959a11f497460c0d101deb39f1328260ab813bda4196112a4af0d",
+      "attestation_id": 54650392
+    },
+    {
+      "name": "freebsd-386",
+      "digest": "sha256:0705a00fa8ce7681e038f667975e38281234c81eb9ca0b7246b2cb482a8f7415",
+      "attestation_id": 54650400
+    },
+    {
+      "name": "freebsd-amd64",
+      "digest": "sha256:bfb4a254b03cfb6037537fc012c4dda8294a504f2f588d230865c689e5304855",
+      "attestation_id": 54650406
+    },
+    {
+      "name": "freebsd-arm64",
+      "digest": "sha256:09111d2522709535474f365edf8dfe359ddbb6d03147e18fff57dd3bc9e49d39",
+      "attestation_id": 54650411
+    },
+    {
+      "name": "linux-386",
+      "digest": "sha256:849dbf80489e1103b403795a138a7608578fd11dedcc17df204128082a64fbf4",
+      "attestation_id": 54650414
+    },
+    {
+      "name": "linux-amd64",
+      "digest": "sha256:8fe885929ebfef92639f6b9da37378073291bf402808e2f6f9ec000e7893bc93",
+      "attestation_id": 54650423
+    },
+    {
+      "name": "linux-arm",
+      "digest": "sha256:803be1e4d74acd5035af4311cc2dec5d009a33cf6c3c3b4c1a7c72071ae83ab8",
+      "attestation_id": 54650429
+    },
+    {
+      "name": "linux-arm64",
+      "digest": "sha256:c9e19110627a448bfc6f44fc2bcc4aa84df1e1848783f9c6e8b6b98717752f49",
+      "attestation_id": 54650431
+    },
+    {
+      "name": "windows-386.exe",
+      "digest": "sha256:a7bace65fee75ba6bfec12b940c55e6bfaca5231ae1272e675b06d722b14e067",
+      "attestation_id": 54650441
+    },
+    {
+      "name": "windows-amd64.exe",
+      "digest": "sha256:ebf47bcbdb19141a38ce7085652902a09410f2d00cab8b18eb876714e5252bdc",
+      "attestation_id": 54650446
+    },
+    {
+      "name": "windows-arm64.exe",
+      "digest": "sha256:2e1f5365e2c1c35cf0653c2505eddf4e1bd7e9e0a17a5664f334acd1e3ae141d",
+      "attestation_id": 54650453
+    }
+  ]
+}
