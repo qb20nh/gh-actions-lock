@@ -70,15 +70,15 @@ The user created active [ruleset `protect`, ID 24848059](https://github.com/qb20
 for `~DEFAULT_BRANCH`. Public API inspection confirms `main` is protected,
 with no bypass, deletion and force-push prevention, and required PRs with zero
 approvals. After the user saved required checks, API readback of the ruleset
-updated at 2026-10-11 03:08:05 KST confirms `Lock policy`, `go-test`,
+updated at 2026-10-11 03:09:09 KST confirms `Lock policy`, `go-test`,
 `integration-stub`, and `dependency-review`, each bound to GitHub Actions
 (integration ID `15368`). `do_not_enforce_on_create` is `false`, so branch
 creation does not bypass these checks.
 
-Strict up-to-date checking remains disabled:
-`strict_required_status_checks_policy` is `false`. Enable **Require branches to
-be up to date before merging** in this existing ruleset and retain its other
-rules. All four check names and their source are verified by hosted controls;
+After the user enabled **Require branches to be up to date before merging**,
+API readback confirms `strict_required_status_checks_policy` is `true`, with
+all four required checks and the other rules retained. All four check names
+and their source are verified by hosted controls;
 `integration-live` remains advisory. The prepared classic branch-protection
 script adds only `Lock policy` and does not modify rulesets.
 
@@ -97,9 +97,9 @@ review currently handles only PRs.
 
 ## Remaining goal blockers
 
-- Strict branch freshness still needs activation and readback. The four
-  required checks are confirmed by ruleset API readback. Full-SHA policy and
-  the exact allowlist are owner-confirmed but
+- The four required checks and strict branch freshness are confirmed by
+  ruleset API readback. Full-SHA policy and the exact allowlist are
+  owner-confirmed but
   cannot yet be read back through the current connection. Applicable
   workflow-event policy also needs Administration access for inspection.
 - Upstream [#125](https://github.com/github/gh-actions-lock/issues/125) remains

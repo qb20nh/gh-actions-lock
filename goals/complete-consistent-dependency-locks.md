@@ -4,7 +4,7 @@ Deliver reviewable fixes so verification reports dependency coverage accurately,
 
 - **Repository:** [github/gh-actions-lock](https://github.com/github/gh-actions-lock)
 - **Assessment baseline:** `3f7c302310dde7556291a2ce0792de36ec41a4c8`
-- **Status:** CLI implementation and the repository-controlled #125 workaround are merged into the fork and tested. Default-branch validation, actual PR events, the merged-source draft release, and four required GitHub Actions checks are proven. Full-SHA policy and the allowlist are owner-confirmed. M6 remains open for strict branch freshness, Actions administration readback, and upstream runtime rejection.
+- **Status:** CLI implementation and the repository-controlled #125 workaround are merged into the fork and tested. Default-branch validation, actual PR events, the merged-source draft release, and four required GitHub Actions checks with strict branch freshness are proven. Full-SHA policy and the allowlist are owner-confirmed. M6 remains open for Actions administration readback and upstream runtime rejection.
 - **Progress:** 5 of 6 milestones complete.
 - **Last validated:** 2026-10-11 KST.
 - **Delivery:** [Merged implementation PR](https://github.com/qb20nh/gh-actions-lock/pull/2), fork main `2169abe6e476bdf58aa32105efcc2a2792fc92b3`, [12 attested draft binaries from that merged source](https://github.com/qb20nh/gh-actions-lock/releases/tag/untagged-88bcef74c4ff66093ea3), and [post-merge validation evidence](../test/runtime/evidence/2026-10-11-postmerge.md). Earlier candidate evidence remains recorded below. Upstream merge and stable publication are separate.
@@ -110,7 +110,7 @@ Deliver reviewable fixes so verification reports dependency coverage accurately,
   - [x] Deploy the policy on the default branch and prove actual PRtarget head/merge status binding with valid, malformed, and restored controls.
   - [x] Confirm default-branch protection exists: active ruleset `protect` (ID `24848059`) prevents deletion/force pushes and requires PRs, with no bypass.
   - [x] Require `Lock policy`, `go-test`, `integration-stub`, and `dependency-review` from GitHub Actions (app `15368`): ruleset API readback confirms all four, no bypass, and no branch-creation exception.
-  - [ ] Enable strict up-to-date checks in that ruleset. The saved ruleset still reports `strict_required_status_checks_policy: false`.
+  - [x] Enable strict up-to-date checks in that ruleset: API readback confirms `strict_required_status_checks_policy: true`, with all four checks retained and no bypass or branch-creation exception.
   - [x] Enable full-SHA action policy: the user confirms **Require actions to be pinned to a full-length commit SHA** is checked. Administration API readback remains unavailable.
   - [x] Enable the exact eight-entry allowlist: the user confirms the supplied policy was saved. Administration API readback remains unavailable.
   - [ ] Inspect applicable workflow-event policy and read back Actions settings. Current connector/shell capabilities cannot administer or inspect these settings.

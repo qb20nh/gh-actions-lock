@@ -64,11 +64,11 @@ store an administrator token in the workflow to perform this setup.
 
 The fork now has an active default-branch ruleset, `protect` (ID `24848059`),
 with no bypass. API readback confirms the four required checks listed below,
-bound to GitHub Actions, with no exception for branch creation. Strict
-up-to-date checking is still disabled. Enable **Require branches to be up to
-date before merging** under **Settings → Rules → Rulesets**; preserve its
-deletion, force-push, pull-request, and required-check rules. The script does not
-alter rulesets, so running it cannot complete this fork's activation.
+bound to GitHub Actions, with no exception for branch creation. **Require
+branches to be up to date before merging** is enabled and confirmed by API
+readback. Preserve its deletion, force-push, pull-request, and required-check
+rules when making changes under **Settings → Rules → Rulesets**. The script
+does not alter rulesets.
 
 For a repository using classic branch protection, the prepared script supports:
 
