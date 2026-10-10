@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+hook_tmp="$(mktemp -d)"
+trap 'rm -rf "$hook_tmp"' EXIT
+
+# Verify the index, including partially staged files, rather than the working tree.
+staged_tree="$(git write-tree)"
+mkdir "$hook_tmp/candidate"
+git archive "$staged_tree" | tar -x -C "$hook_tmp/candidate"
+mkdir "$hook_tmp/candidate/.git"
+
+go build -mod=readonly -o "$hook_tmp/gh-actions-lock" ./cmd/gh-actions-lock
+cd "$hook_tmp/candidate"
+mapfile -d '' workflows < <(rg --files --no-ignore --hidden -0 .github/workflows --glob '*.yml' --glob '*.yaml' | sort -z)
+if [ "${#workflows[@]}" -eq 0 ]; then
+  echo 'error: staged repository contains no workflows' >&2
+  exit 1
+fi
+if ! "$hook_tmp/gh-actions-lock" --hostname github.com --require-lockfile --verify-local \
+    --json=valid,findings,dependencies "${workflows[@]}" > "$hook_tmp/verification.json"; then
+  cat "$hook_tmp/verification.json" >&2
+  exit 1
+fi
+python3 - "$hook_tmp/verification.json" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+
+report = json.loads(Path(sys.argv[1]).read_text())
+if report.get("valid") is not True:
+    sys.exit("error: staged lock verification did not succeed")
+for dependency in report["dependencies"]:
+    ref = dependency["ref"]
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", ref) or ref.lower() != dependency["sha"].lower():
+        sys.exit(f"error: staged dependency is not frozen: {dependency['nwo']}@{ref}")
+print("Staged workflow locks and recorded full-SHA references verified.")
+PY
+if [ "${GH_ACTIONS_LOCK_VERIFY_FROZEN:-0}" = 1 ]; then
+  "$hook_tmp/gh-actions-lock" --hostname github.com --verify-frozen "${workflows[@]}"
+fi

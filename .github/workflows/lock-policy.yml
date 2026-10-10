@@ -1,0 +1,196 @@
+name: Lock policy
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+  merge_group:
+    types: [checks_requested]
+  push:
+    branches:
+      - main
+      - codex/m6/combo-*
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: write
+
+jobs:
+  policy:
+    # The required context is posted onto the candidate commits below. A
+    # pull_request_target job's native check is associated with the base revision.
+    name: Validate lock policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      LOCK_VERIFIER_REPOSITORY: qb20nh/gh-actions-lock
+      # Trusted verifier with required-lock and defining-commit graph checks.
+      LOCK_VERIFIER_SHA: c9ef9b24670eeddcb0a545d071e30f276cd792e5
+      LOCK_EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      LOCK_EVENT_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+      LOCK_WORKFLOW_SHA: ${{ github.workflow_sha }}
+    steps:
+      - name: Mark the candidate policy check pending
+        id: pending
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$LOCK_EVENT_HEAD_SHA" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]
+          [[ "$LOCK_EVENT_HEAD_REPOSITORY" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]
+          python3 - "$RUNNER_TEMP/lock-policy-revisions.json" <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          pathlib.Path(sys.argv[1]).write_text(json.dumps([{
+              "repository": os.environ["LOCK_EVENT_HEAD_REPOSITORY"],
+              "sha": os.environ["LOCK_EVENT_HEAD_SHA"],
+          }]))
+          PY
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$LOCK_EVENT_HEAD_SHA" \
+            -f state=pending -f context='Lock policy' \
+            -f description='Validating the complete frozen dependency graph' \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > /dev/null
+
+      - name: Bind the policy to exact head and merge revisions
+        id: sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == pull_request_target ]]; then
+            lock_pr_number=$(jq -er '.number | select(type == "number")' "$GITHUB_EVENT_PATH")
+            [[ "$lock_pr_number" =~ ^[0-9]+$ ]]
+            # Mergeability may still be calculating when GitHub delivers the event.
+            for lock_attempt in 1 2 3 4 5; do
+              gh api "repos/$GITHUB_REPOSITORY/pulls/$lock_pr_number" > "$RUNNER_TEMP/lock-policy-pull.json"
+              if jq -e '.mergeable != null' "$RUNNER_TEMP/lock-policy-pull.json" > /dev/null; then
+                break
+              fi
+              sleep 2
+            done
+            python3 - "$RUNNER_TEMP/lock-policy-pull.json" "$RUNNER_TEMP/lock-policy-revisions.json" <<'PY'
+          import json
+          import os
+          import pathlib
+          import re
+          import sys
+
+          pull = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          if pull["head"]["sha"] != os.environ["LOCK_EVENT_HEAD_SHA"]:
+              raise SystemExit("The pull request head changed; a newer policy run must validate it")
+          if pull["head"]["repo"]["full_name"] != os.environ["LOCK_EVENT_HEAD_REPOSITORY"]:
+              raise SystemExit("The pull request repository changed")
+          merge_sha = pull.get("merge_commit_sha")
+          if pull.get("mergeable") is not True or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", merge_sha or ""):
+              raise SystemExit("A current merge revision is required; resolve conflicts or retry once GitHub computes it")
+          path = pathlib.Path(sys.argv[2])
+          revisions = json.loads(path.read_text())
+          merge = {"repository": os.environ["GITHUB_REPOSITORY"], "sha": merge_sha}
+          if merge not in revisions:
+              revisions.append(merge)
+          path.write_text(json.dumps(revisions))
+          PY
+          else
+            test "$LOCK_EVENT_HEAD_SHA" = "$LOCK_WORKFLOW_SHA"
+            if [[ "$GITHUB_EVENT_NAME" == merge_group ]]; then
+              test "$(jq -er '.merge_group.head_sha' "$GITHUB_EVENT_PATH")" = "$LOCK_EVENT_HEAD_SHA"
+            fi
+          fi
+          while IFS= read -r lock_sha; do
+            gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$lock_sha" \
+              -f state=pending -f context='Lock policy' \
+              -f description='Validating the complete frozen dependency graph' \
+              -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > /dev/null
+          done < <(jq -r '.[].sha' "$RUNNER_TEMP/lock-policy-revisions.json" | sort -u)
+
+      - name: Build the immutable trusted verifier
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$LOCK_VERIFIER_SHA" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]
+          mkdir -p "$RUNNER_TEMP/lock-verifier"
+          gh api "repos/$LOCK_VERIFIER_REPOSITORY/tarball/$LOCK_VERIFIER_SHA" > "$RUNNER_TEMP/lock-verifier.tar.gz"
+          python3 - "$RUNNER_TEMP/lock-verifier.tar.gz" "$RUNNER_TEMP/lock-verifier" <<'PY'
+          import pathlib
+          import sys
+          import tarfile
+
+          with tarfile.open(sys.argv[1], "r:gz") as archive:
+              archive.extractall(sys.argv[2], filter="data")
+          roots = list(pathlib.Path(sys.argv[2]).iterdir())
+          if len(roots) != 1 or not roots[0].is_dir() or roots[0].is_symlink():
+              raise SystemExit("Unexpected verifier archive layout")
+          roots[0].rename(pathlib.Path(sys.argv[2]).with_name("lock-verifier-source"))
+          PY
+          cd "$RUNNER_TEMP/lock-verifier-source"
+          GOTOOLCHAIN=auto GOWORK=off GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org \
+            go build -mod=readonly -p=4 -o "$RUNNER_TEMP/lock-verify" ./cmd/gh-actions-lock
+
+      - name: Verify every candidate workflow as data
+        id: validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS=$'\t' read -r lock_repository lock_sha; do
+            [[ "$lock_repository" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]
+            [[ "$lock_sha" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]
+            lock_candidate="$RUNNER_TEMP/lock-candidate-$lock_sha"
+            mkdir -p "$lock_candidate"
+            gh api "repos/$lock_repository/tarball/$lock_sha" > "$lock_candidate.tar.gz"
+            python3 - "$lock_candidate.tar.gz" "$lock_candidate" <<'PY'
+          import pathlib
+          import sys
+          import tarfile
+
+          with tarfile.open(sys.argv[1], "r:gz") as archive:
+              archive.extractall(sys.argv[2], filter="data")
+          roots = list(pathlib.Path(sys.argv[2]).iterdir())
+          if len(roots) != 1 or not roots[0].is_dir() or roots[0].is_symlink():
+              raise SystemExit("Unexpected candidate archive layout")
+          root = roots[0]
+          for relative in (".github", ".github/workflows", ".github/workflows/actions.lock", ".github/workflows/lock-policy.yml"):
+              path = root / relative
+              if path.is_symlink():
+                  raise SystemExit(f"Symlinked validation input: {relative}")
+          if not (root / ".github/workflows/lock-policy.yml").is_file():
+              raise SystemExit("The required policy workflow is missing")
+          root.rename(pathlib.Path(sys.argv[2]).with_name(pathlib.Path(sys.argv[2]).name + "-source"))
+          PY
+            (
+              cd "$lock_candidate-source"
+              git init -q
+              if ! "$RUNNER_TEMP/lock-verify" --hostname github.com --require-lockfile --verify-frozen \
+                --json=valid,findings > "$RUNNER_TEMP/lock-verification-$lock_sha.json"; then
+                cat "$RUNNER_TEMP/lock-verification-$lock_sha.json"
+                exit 1
+              fi
+              jq -e '.valid == true' "$RUNNER_TEMP/lock-verification-$lock_sha.json"
+            )
+            printf 'LOCK_POLICY_PASSED=%s\n' "$lock_sha"
+          done < <(jq -r '.[] | [.repository, .sha] | @tsv' "$RUNNER_TEMP/lock-policy-revisions.json")
+
+      - name: Publish the required candidate status
+        if: always() && steps.pending.outcome == 'success'
+        env:
+          LOCK_SOURCE_OUTCOME: ${{ steps.sources.outcome }}
+          LOCK_BUILD_OUTCOME: ${{ steps.build.outcome }}
+          LOCK_VALIDATION_OUTCOME: ${{ steps.validate.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          lock_state=failure
+          lock_description='Frozen dependency validation failed; see workflow logs'
+          if [[ "$LOCK_SOURCE_OUTCOME" == success && "$LOCK_BUILD_OUTCOME" == success && "$LOCK_VALIDATION_OUTCOME" == success ]]; then
+            lock_state=success
+            lock_description='Every candidate workflow has a complete frozen dependency graph'
+          fi
+          while IFS= read -r lock_sha; do
+            gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$lock_sha" \
+              -f state="$lock_state" -f context='Lock policy' \
+              -f description="$lock_description" \
+              -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > /dev/null
+          done < <(jq -r '.[].sha' "$RUNNER_TEMP/lock-policy-revisions.json" | sort -u)

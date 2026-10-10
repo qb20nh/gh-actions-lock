@@ -7,7 +7,7 @@ freeze its remote children.
 
 ## Hosted evidence
 
-The [probe workflow](../../../.github/workflows/m6-workarounds.yml) ran on
+The [probe workflow](../workflows/m6-workarounds.yml) ran on
 isolated fork branches. The existing draft release and default branches were
 unchanged. The observed runner was `2.337.0`; probes started on 2026-10-10
 at 23:16 KST. GitHub logs use UTC.

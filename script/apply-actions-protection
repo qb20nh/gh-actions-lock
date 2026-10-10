@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""Apply the reviewed Actions policy without replacing unrelated protections."""
+
+import argparse
+import base64
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+from urllib.parse import quote
+
+
+ROOT = Path(__file__).resolve().parent.parent
+POLICY_PATH = ".github/actions-policy.json"
+EXACT_REF = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)?@[0-9a-f]{40}\Z")
+API_VERSION = "2026-03-10"
+
+
+class PolicyError(Exception):
+    pass
+
+
+def load_policy(path):
+    policy = json.loads(path.read_text())
+    if policy.get("version") != 1:
+        raise PolicyError("unsupported Actions policy version")
+    check = policy.get("required_check", {})
+    if check.get("context") != "Lock policy" or check.get("app_id") != 15368:
+        raise PolicyError("required check must be Lock policy from GitHub Actions (15368)")
+    patterns = policy.get("patterns_allowed")
+    if not isinstance(patterns, list) or not patterns:
+        raise PolicyError("policy must contain the reviewed dependency allowlist")
+    if len(patterns) > 1000:
+        raise PolicyError("GitHub allows at most 1000 selected action patterns")
+    if any(not isinstance(ref, str) or not EXACT_REF.fullmatch(ref)
+           or any(part in (".", "..", "") for part in ref.split("@")[0].split("/")) for ref in patterns):
+        raise PolicyError("allowlist entries must be exact public action/workflow refs with full SHAs")
+    if patterns != sorted(set(patterns)):
+        raise PolicyError("allowlist must be sorted and contain no duplicates")
+    return policy
+
+
+class GitHub:
+    def api(self, endpoint, method="GET", body=None):
+        command = ["gh", "api", "--hostname", "github.com", "--method", method,
+                   "-H", "Accept: application/vnd.github+json",
+                   "-H", f"X-GitHub-Api-Version: {API_VERSION}", endpoint]
+        if body is not None:
+            command.extend(["--input", "-"])
+        result = subprocess.run(command, input=None if body is None else json.dumps(body),
+                                text=True, capture_output=True)
+        if result.returncode:
+            # gh debug/auth output can contain credential details; report the endpoint only.
+            raise PolicyError(f"{method} {endpoint} failed; check gh authentication and repository Administration permission")
+        return json.loads(result.stdout) if result.stdout.strip() else None
+
+
+def required_checks(current, required):
+    checks = []
+    seen = set()
+    for check in (current or {}).get("checks", []):
+        if check["context"] == required["context"]:
+            continue
+        checks.append({"context": check["context"], "app_id": check.get("app_id") or -1})
+        seen.add(check["context"])
+    for context in (current or {}).get("contexts", []):
+        if context != required["context"] and context not in seen:
+            checks.append({"context": context, "app_id": -1})
+    checks.append(required)
+    return {"strict": True, "contexts": [], "checks": checks}
+
+
+def check_state(current):
+    if not current:
+        return None
+    checks = current.get("checks", [])
+    if not checks:
+        checks = [{"context": context, "app_id": -1} for context in current.get("contexts", [])]
+    return {"strict": current.get("strict", False),
+            "checks": sorted((check["context"], check.get("app_id") or -1) for check in checks)}
+
+
+def build_plan(repo, branch, permissions, selected, protection, policy):
+    if permissions.get("enabled") is not True:
+        raise PolicyError("Actions is disabled; refusing to enable it as a side effect")
+    if permissions.get("allowed_actions") == "local_only":
+        raise PolicyError("existing local-only policy is stricter; review external dependencies before replacing it")
+    actions = {"enabled": True, "allowed_actions": "selected", "sha_pinning_required": True}
+    allowlist = {"github_owned_allowed": False, "verified_allowed": False,
+                 "patterns_allowed": policy["patterns_allowed"]}
+    endpoint = f"repos/{repo}/branches/{quote(branch, safe='')}/protection"
+    checks = required_checks((protection or {}).get("required_status_checks"), policy["required_check"])
+    plan = []
+    if any(permissions.get(key) != value for key, value in actions.items()):
+        plan.append(("PUT", f"repos/{repo}/actions/permissions", actions))
+    if selected != allowlist:
+        plan.append(("PUT", f"repos/{repo}/actions/permissions/selected-actions", allowlist))
+    if protection is None:
+        plan.append(("PUT", endpoint, {
+            "required_status_checks": checks, "enforce_admins": True,
+            "required_pull_request_reviews": {"required_approving_review_count": 0,
+                                              "require_code_owner_reviews": False},
+            "restrictions": None, "allow_force_pushes": False, "allow_deletions": False,
+        }))
+    else:
+        if check_state(protection.get("required_status_checks")) != check_state(checks):
+            plan.append(("PATCH", endpoint + "/required_status_checks", checks))
+        if not protection.get("enforce_admins", {}).get("enabled", False):
+            plan.append(("POST", endpoint + "/enforce_admins", None))
+    return plan
+
+
+def deployed_policy(github, repo, branch_info, policy):
+    sha = branch_info["commit"]["sha"]
+    contents = github.api(f"repos/{repo}/contents/{POLICY_PATH}?ref={sha}")
+    remote_policy = json.loads(base64.b64decode(contents["content"]).decode())
+    if remote_policy != policy:
+        raise PolicyError("local policy differs from the protected branch; deploy and validate it before applying settings")
+    workflow = github.api(f"repos/{repo}/contents/.github/workflows/lock-policy.yml?ref={sha}")
+    if workflow.get("type") != "file":
+        raise PolicyError("protected branch must contain the Lock policy workflow")
+    page = 1
+    while True:
+        response = github.api(f"repos/{repo}/commits/{sha}/status?per_page=100&page={page}")
+        if response.get("sha") != sha:
+            raise PolicyError("status response does not match the protected branch revision")
+        statuses = response["statuses"]
+        for status in statuses:
+            if (status.get("context") == policy["required_check"]["context"]
+                    and status.get("creator", {}).get("login") == "github-actions[bot]"
+                    and status.get("state") == "success"):
+                return sha
+            if status.get("context") == policy["required_check"]["context"]:
+                raise PolicyError("the latest Lock policy status is not successful from GitHub Actions")
+        if len(statuses) < 100:
+            raise PolicyError("protected branch head has no successful Lock policy status; run it before applying settings")
+        page += 1
+
+
+def main(argv=None, github=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repo", required=True, help="public owner/repo to configure")
+    parser.add_argument("--branch", help="protected branch (defaults to the repository default branch)")
+    parser.add_argument("--apply", action="store_true", help="apply and read back the reviewed plan; default is read-only")
+    args = parser.parse_args(argv)
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repo):
+        raise PolicyError("--repo must be owner/repo")
+    policy = load_policy(ROOT / POLICY_PATH)
+    github = github or GitHub()
+    metadata = github.api(f"repos/{args.repo}")
+    if not metadata.get("permissions", {}).get("admin", False):
+        raise PolicyError("an authenticated repository administrator is required")
+    if metadata.get("private", True):
+        raise PolicyError("GitHub's selected action patterns apply only to public repositories")
+    branch = args.branch or metadata["default_branch"]
+    endpoint = f"repos/{args.repo}/branches/{quote(branch, safe='')}"
+    branch_info = github.api(endpoint)
+    permissions = github.api(f"repos/{args.repo}/actions/permissions")
+    selected = None
+    if permissions.get("allowed_actions") == "selected":
+        selected = github.api(f"repos/{args.repo}/actions/permissions/selected-actions")
+    # A protected branch that is governed only by rulesets needs its own reviewed configuration.
+    protection = github.api(endpoint + "/protection") if branch_info.get("protected") else None
+    plan = build_plan(args.repo, branch, permissions, selected, protection, policy)
+    print(json.dumps({"repository": args.repo, "branch": branch, "apply": args.apply,
+                      "requests": [{"method": method, "endpoint": path, "body": body}
+                                   for method, path, body in plan]}, indent=2))
+    if not args.apply:
+        print("Read-only plan. Deploy and validate the workflow, then rerun with --apply.")
+        return
+    tested_sha = deployed_policy(github, args.repo, branch_info, policy)
+    if github.api(endpoint)["commit"]["sha"] != tested_sha:
+        raise PolicyError("branch changed during preflight; rerun against the new head")
+    for index, (method, path, body) in enumerate(plan):
+        try:
+            github.api(path, method=method, body=body)
+        except PolicyError as error:
+            raise PolicyError(f"{error}; {index} earlier settings requests completed; rerun the read-only plan before retrying") from error
+    permissions = github.api(f"repos/{args.repo}/actions/permissions")
+    selected = github.api(f"repos/{args.repo}/actions/permissions/selected-actions")
+    protection = github.api(endpoint + "/protection")
+    if build_plan(args.repo, branch, permissions, selected, protection, policy):
+        raise PolicyError("settings readback differs from the reviewed policy; some requests may already have applied")
+    print(f"Verified Actions protections for {args.repo}:{branch} at {tested_sha}.")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (PolicyError, OSError, ValueError, KeyError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        sys.exit(1)

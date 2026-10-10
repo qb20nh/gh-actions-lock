@@ -1,0 +1,96 @@
+name: Lock validation
+
+on:
+  workflow_call:
+    inputs:
+      source-repository:
+        description: Repository containing the workflow revision to validate
+        type: string
+        default: ''
+      source-sha:
+        description: Exact commit containing the caller workflow
+        required: true
+        type: string
+      workflow-path:
+        description: Caller workflow path below .github/workflows
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate locked dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      LOCK_VERIFIER_REPOSITORY: qb20nh/gh-actions-lock
+      # Trusted verifier with required-lock and defining-commit graph checks.
+      LOCK_VERIFIER_SHA: c9ef9b24670eeddcb0a545d071e30f276cd792e5
+      LOCK_SOURCE_REPOSITORY: ${{ inputs.source-repository || github.repository }}
+      LOCK_SOURCE_SHA: ${{ inputs.source-sha }}
+      LOCK_WORKFLOW_PATH: ${{ inputs.workflow-path }}
+    steps:
+      - name: Build the immutable trusted verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$LOCK_VERIFIER_SHA" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]
+          mkdir -p "$RUNNER_TEMP/lock-verifier"
+          gh api "repos/$LOCK_VERIFIER_REPOSITORY/tarball/$LOCK_VERIFIER_SHA" > "$RUNNER_TEMP/lock-verifier.tar.gz"
+          python3 - "$RUNNER_TEMP/lock-verifier.tar.gz" "$RUNNER_TEMP/lock-verifier" <<'PY'
+          import pathlib
+          import sys
+          import tarfile
+
+          with tarfile.open(sys.argv[1], "r:gz") as archive:
+              archive.extractall(sys.argv[2], filter="data")
+          roots = list(pathlib.Path(sys.argv[2]).iterdir())
+          if len(roots) != 1 or not roots[0].is_dir() or roots[0].is_symlink():
+              raise SystemExit("Unexpected verifier archive layout")
+          roots[0].rename(pathlib.Path(sys.argv[2]).with_name("lock-verifier-source"))
+          PY
+          cd "$RUNNER_TEMP/lock-verifier-source"
+          GOTOOLCHAIN=auto GOWORK=off GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org \
+            go build -mod=readonly -p=4 -o "$RUNNER_TEMP/lock-verify" ./cmd/gh-actions-lock
+
+      - name: Verify the exact workflow revision as data
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$LOCK_SOURCE_REPOSITORY" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]
+          [[ "$LOCK_SOURCE_SHA" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]
+          [[ "$LOCK_WORKFLOW_PATH" =~ ^\.github/workflows/[A-Za-z0-9_.-]+\.ya?ml$ ]]
+          mkdir -p "$RUNNER_TEMP/lock-candidate"
+          gh api "repos/$LOCK_SOURCE_REPOSITORY/tarball/$LOCK_SOURCE_SHA" > "$RUNNER_TEMP/lock-candidate.tar.gz"
+          python3 - "$RUNNER_TEMP/lock-candidate.tar.gz" "$RUNNER_TEMP/lock-candidate" "$LOCK_WORKFLOW_PATH" <<'PY'
+          import pathlib
+          import sys
+          import tarfile
+
+          with tarfile.open(sys.argv[1], "r:gz") as archive:
+              archive.extractall(sys.argv[2], filter="data")
+          roots = list(pathlib.Path(sys.argv[2]).iterdir())
+          if len(roots) != 1 or not roots[0].is_dir() or roots[0].is_symlink():
+              raise SystemExit("Unexpected candidate archive layout")
+          root = roots[0]
+          for relative in (".github", ".github/workflows", ".github/workflows/actions.lock", sys.argv[3]):
+              path = root / relative
+              if path.is_symlink():
+                  raise SystemExit(f"Symlinked validation input: {relative}")
+          if not (root / sys.argv[3]).is_file():
+              raise SystemExit("Caller workflow is missing from the specified commit")
+          root.rename(pathlib.Path(sys.argv[2]).with_name("lock-candidate-source"))
+          PY
+          cd "$RUNNER_TEMP/lock-candidate-source"
+          git init -q
+          # No path arguments: a new workflow must also satisfy the policy.
+          if ! "$RUNNER_TEMP/lock-verify" --hostname github.com --require-lockfile --verify-frozen \
+            --json=valid,findings > "$RUNNER_TEMP/lock-verification.json"; then
+            cat "$RUNNER_TEMP/lock-verification.json"
+            exit 1
+          fi
+          jq -e '.valid == true' "$RUNNER_TEMP/lock-verification.json"
+          printf 'LOCK_GATE_PASSED=%s\n' "$LOCK_SOURCE_SHA"

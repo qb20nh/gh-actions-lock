@@ -12,9 +12,16 @@ permissions:
   contents: read
 
 jobs:
+  lock-validation:
+    uses: ./.github/workflows/lock-validation.yml
+    with:
+      source-sha: ${{ github.workflow_sha }}
+      workflow-path: .github/workflows/m6-release-smoke.yml
+
   release-asset:
     name: Verify uploaded Linux binary
-    if: github.repository == 'qb20nh/gh-actions-lock' && startsWith(github.ref, 'refs/heads/codex/m6/evidence-')
+    needs: lock-validation
+    if: needs.lock-validation.result == 'success' && github.repository == 'qb20nh/gh-actions-lock' && startsWith(github.ref, 'refs/heads/codex/m6/evidence-')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -27,7 +34,7 @@ jobs:
       M6_RELEASE_ID: 408980287
       M6_ASSET_SHA256: 0281e7f65c40b38f799d6392b185274b737a12a4163362a2390c6468c942276e
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
           fetch-tags: true
@@ -64,8 +71,8 @@ jobs:
           "$RUNNER_TEMP/m6-release/linux-amd64" --version
           "$RUNNER_TEMP/m6-release/linux-amd64" --help > /dev/null
           "$RUNNER_TEMP/m6-release/linux-amd64" --verify-local --json=valid,findings \
-            .github/workflows/m6-validation.yml .github/workflows/m6-runtime.yml \
-            .github/workflows/m6-release-smoke.yml > "$RUNNER_TEMP/m6-release/verification.json"
+            .github/workflows/m6-validation.yml .github/workflows/m6-release-smoke.yml \
+            > "$RUNNER_TEMP/m6-release/verification.json"
           jq -e '.valid == true' "$RUNNER_TEMP/m6-release/verification.json"
       - name: Attach runtime evidence to draft notes
         shell: bash

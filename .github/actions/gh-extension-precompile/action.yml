@@ -1,0 +1,119 @@
+name: "release extension"
+description: "Generate a release for a precompiled gh extension"
+inputs:
+  build_script_override:
+    description: "Path to custom build script for producing binaries to upload"
+  draft_release:
+    description: "Create a draft release"
+  github_token:
+    description: "GitHub token to use, defaults to `github.token` if unspecified"
+  go_version:
+    description: "The Go version to use for compiling (supports semver spec and ranges)"
+  go_version_file:
+    description: Path to the go.mod or go.work file to determine version of go to use
+  gpg_fingerprint:
+    description: "GPG fingerprint to use for signing releases"
+  release_tag:
+    description: "Tag that the release should be created from, defaults to `github.ref` if unspecified"
+  release_title_prefix:
+    description: "Title prefix of the release, defaults to repository name if unspecified"
+  generate_attestations:
+    description: "Whether to generate artifact attestations for release binaries to establish build provenance, defaults to `false` if unspecified"
+    default: false
+  release_android:
+    description: "Whether to release android binaries, defaults to `false` if unspecified"
+    default: false
+  android_ndk_home:
+    description: "Path to the Android NDK for android-amd64 and android-arm64 builds"
+  android_sdk_version:
+    description: "Android SDK build-tools version"
+  go_build_options:
+    description: "Additional options to pass to go build command (e.g., './cmd/my-extension' to specify source directory or '-tags production' for build tags)"
+branding:
+  color: purple
+  icon: box
+runs:
+  using: composite
+  steps:
+    # TODO: figure out how to avoid setting up Go for non-Go extensions
+    - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      with:
+        # The default go version is managed here because actions/setup-go favors go-version over go-version-file,
+        # requiring us to only pass it if no other inputs are provided.
+        #
+        # Otherwise, we pass along the values given, letting the user catch the warning notice in the logs
+        # and picking either go-version or go-version-file.
+        go-version: ${{(inputs.go_version_file == '' && inputs.go_version == '') && '1.18' || inputs.go_version}}
+        go-version-file: ${{inputs.go_version_file}}
+
+    - id: determine_token
+      run: |
+        if [ -n "$INPUT_TOKEN" ]; then
+          token="$INPUT_TOKEN"
+        else
+          token="$DEFAULT_TOKEN"
+        fi
+        echo "TOKEN=$token" >> "$GITHUB_OUTPUT"
+      env:
+        DEFAULT_TOKEN: ${{ github.token }}
+        INPUT_TOKEN: ${{ inputs.github_token }}
+      shell: bash
+
+    - id: determine_release_tag
+      run: |
+        if [ -n "$INPUT_TAG" ]; then
+          tag="$INPUT_TAG"
+        elif [[ $GITHUB_REF = refs/tags/* ]]; then
+          tag="${GITHUB_REF#refs/tags/}"
+        else
+          tag="$(git describe --tags --abbrev=0)"
+        fi
+
+        echo "TAG=$tag" >> "$GITHUB_OUTPUT"
+      env:
+        INPUT_TAG: ${{ inputs.release_tag }}
+      shell: bash
+
+    - id: determine_release_title_prefix
+      run: |
+        if [ -n "$INPUT_TITLE" ]; then
+          prefix="$INPUT_TITLE"
+        else
+          prefix="${GITHUB_REPOSITORY#*/}"
+        fi
+        echo "PREFIX=$prefix" >> "$GITHUB_OUTPUT"
+      env:
+        INPUT_TITLE: ${{ inputs.release_title_prefix }}
+      shell: bash
+
+    - id: determine_android_ndk_home
+      run: |
+        if [ -n "$INPUT_ANDROID_NDK_HOME" ]; then
+          android_ndk_home="$INPUT_ANDROID_NDK_HOME"
+        else
+          android_ndk_home="$ANDROID_NDK_HOME"
+        fi
+        echo "ANDROID_NDK_HOME=$android_ndk_home" >> "$GITHUB_OUTPUT"
+      env:
+        INPUT_ANDROID_NDK_HOME: ${{ inputs.android_ndk_home }}
+      shell: bash
+
+    - run: ${GITHUB_ACTION_PATH//\\//}/build_and_release.sh
+      env:
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        GITHUB_TOKEN: ${{ steps.determine_token.outputs.TOKEN }}
+        GPG_FINGERPRINT: ${{ inputs.gpg_fingerprint }}
+        GH_EXT_BUILD_SCRIPT: ${{ inputs.build_script_override }}
+        GH_RELEASE_TAG: ${{ steps.determine_release_tag.outputs.TAG }}
+        GH_RELEASE_TITLE_PREFIX: ${{ steps.determine_release_title_prefix.outputs.PREFIX }}
+        DRAFT_RELEASE: ${{ inputs.draft_release }}
+        ANDROID_NDK_HOME: ${{ steps.determine_android_ndk_home.outputs.ANDROID_NDK_HOME }}
+        ANDROID_SDK_VERSION: ${{ inputs.android_sdk_version }}
+        RELEASE_ANDROID: ${{ inputs.release_android }}
+        GO_BUILD_OPTIONS: ${{ inputs.go_build_options }}
+      shell: bash
+
+    - if: ${{ inputs.generate_attestations == 'true' }}
+      uses: actions/attest-build-provenance@ef244123eb79f2f7a7e75d99086184180e6d0018 # v1
+      with:
+        subject-path: "${{ github.workspace }}/dist/*"

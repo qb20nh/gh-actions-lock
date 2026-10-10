@@ -13,15 +13,23 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  lock-validation:
+    uses: ./.github/workflows/lock-validation.yml
+    with:
+      source-sha: ${{ github.workflow_sha }}
+      workflow-path: .github/workflows/release.yml
+
   publish:
     name: Publish
+    needs: lock-validation
+    if: needs.lock-validation.result == 'success'
     permissions:
       contents: write
       id-token: write
       attestations: write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
           fetch-tags: true
@@ -29,7 +37,7 @@ jobs:
       - name: Verify tag
         run: script/verify-release-tag "$GITHUB_REF_NAME" v
 
-      - uses: cli/gh-extension-precompile@v2.1.0
+      - uses: $/.github/actions/gh-extension-precompile
         with:
           generate_attestations: true
           go_version_file: go.mod
