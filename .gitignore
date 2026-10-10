@@ -1,7 +1,1 @@
-/gh-actions-lock
-/gh-actions-lock.exe
-
-# VHS demo recordings
-/demo/vhs/out/
-profiles/
-dist/
+.github/workflows/export-ignore-probe.yml

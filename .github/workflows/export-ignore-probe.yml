@@ -1,0 +1,14 @@
+name: Export-ignore negative
+on: workflow_dispatch
+jobs:
+  lock-validation:
+    uses: ./.github/workflows/lock-validation.yml
+    with:
+      source-sha: ${{ github.workflow_sha }}
+      workflow-path: .github/workflows/export-ignore-probe.yml
+  consumer:
+    needs: lock-validation
+    if: needs.lock-validation.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
