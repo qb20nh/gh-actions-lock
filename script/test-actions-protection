@@ -146,35 +146,73 @@ class ProtectionTests(unittest.TestCase):
         self.assertNotIn("should-never-be-printed", str(error.exception))
 
 
-@unittest.skipUnless(shutil.which("git") and shutil.which("rg"), "hook inventory needs git and rg")
-class HookInventoryTests(unittest.TestCase):
-    def test_tracked_ignored_workflow_is_verified(self):
+@unittest.skipUnless(shutil.which("git") and shutil.which("go"), "hook checks need git and Go")
+class HookSnapshotTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.binary_directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.binary_directory.cleanup)
+        cls.binary = Path(cls.binary_directory.name) / "gh-actions-lock"
+        cls.repository = Path(__file__).resolve().parent.parent
+        subprocess.run(["go", "build", "-mod=readonly", "-p=4", "-o", str(cls.binary), "./cmd/gh-actions-lock"],
+                       cwd=cls.repository, check=True)
+
+    def check_snapshot(self, staged="valid", workspace=None, hidden=None):
+        sha = "de0fac2e4500dabe0009e67214ff5f5447ce83dd"
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / ".github/workflows").mkdir(parents=True)
+            workflows = root / ".github/workflows"
+            workflows.mkdir(parents=True)
             (root / "bin").mkdir()
-            (root / ".gitignore").write_text(".github/workflows/ignored.yml\n")
-            (root / ".github/workflows/normal.yml").write_text("name: normal\n")
-            (root / ".github/workflows/ignored.yml").write_text("name: ignored\n")
+            (root / "script").mkdir()
+            shutil.copy(self.repository / "script/materialize-git-tree", root / "script/materialize-git-tree")
+            ref = "v6.0.2" if staged == "tagged" else sha
+            workflow = "name: test\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@"
+            (workflows / "normal.yml").write_text(workflow + ref + "\n")
+            lock = ("version: 'v0.0.3'\nworkflows:\n  '.github/workflows/normal.yml':\n    - 'actions/checkout@"
+                    + ref + "'\ndependencies:\n  'actions/checkout@" + ref + "':\n    ref: '" + ref
+                    + "'\n    commit: 'sha1-" + sha + "'\n    owner_id: 44036562\n    repo_id: 197814629\n")
+            if staged == "transitive-tagged":
+                lock += ("    uses:\n      - 'actions/setup-go@v5'\n  'actions/setup-go@v5':\n    ref: 'v5'\n"
+                         "    commit: 'sha1-40f1582b2485089dde7abd97c1529aa768e1baff'\n"
+                         "    owner_id: 44036562\n    repo_id: 192624594\n")
+            if staged != "missing":
+                (workflows / "actions.lock").write_text("version: [malformed\n" if staged == "malformed" else lock)
+            if hidden:
+                (workflows / "ignored.yml").write_text(workflow + "v5.0.1\n")
+                if hidden == "ignore":
+                    (root / ".gitignore").write_text(".github/workflows/ignored.yml\n")
+                else:
+                    (root / ".gitattributes").write_text(".github/workflows/ignored.yml export-ignore\n")
             subprocess.run(["git", "init", "-q"], cwd=root, check=True)
-            subprocess.run(["git", "add", "--force", ".github", ".gitignore"], cwd=root, check=True)
-            cli = root / "verify"
-            cli.write_text("#!/usr/bin/env python3\nimport json, os, pathlib, sys\n"
-                           "pathlib.Path(os.environ['HOOK_TEST_ARGS']).write_text(json.dumps(sys.argv[1:]))\n"
-                           "print(json.dumps({'valid': True, 'dependencies': []}))\n")
-            cli.chmod(0o755)
+            subprocess.run(["git", "add", "--force", "."], cwd=root, check=True)
+            if workspace:
+                (workflows / "actions.lock").write_text("version: [malformed\n" if workspace == "malformed" else lock)
             go = root / "bin/go"
             go.write_text("#!/usr/bin/env python3\nimport os, shutil, sys\n"
                           "shutil.copy(os.environ['HOOK_TEST_CLI'], sys.argv[sys.argv.index('-o') + 1])\n")
             go.chmod(0o755)
-            args_path = root / "args.json"
             env = os.environ | {"PATH": str(root / "bin") + os.pathsep + os.environ["PATH"],
-                                "HOOK_TEST_ARGS": str(args_path), "HOOK_TEST_CLI": str(cli),
+                                "HOOK_TEST_CLI": str(self.binary),
                                 "GH_ACTIONS_LOCK_VERIFY_FROZEN": "0"}
-            hook = Path(__file__).resolve().parent.parent / ".githooks/pre-commit"
+            hook = self.repository / ".githooks/pre-commit"
             result = subprocess.run([str(hook)], cwd=root, env=env, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(".github/workflows/ignored.yml", json.loads(args_path.read_text()))
+            return result
+
+    def test_staged_snapshot_and_offline_sha_policy(self):
+        cases = [
+            ("staged valid lock ignores malformed workspace", {"workspace": "malformed"}, 0),
+            ("staged malformed lock rejects valid workspace", {"staged": "malformed", "workspace": "valid"}, 1),
+            ("staged missing lock rejects unstaged replacement", {"staged": "missing", "workspace": "valid"}, 1),
+            ("mutable direct ref rejected", {"staged": "tagged"}, 1),
+            ("recorded mutable child rejected", {"staged": "transitive-tagged"}, 1),
+            ("tracked ignored workflow verified", {"hidden": "ignore"}, 1),
+            ("export-ignored workflow verified", {"hidden": "export"}, 1),
+        ]
+        for name, options, expected in cases:
+            with self.subTest(name=name):
+                result = self.check_snapshot(**options)
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

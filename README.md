@@ -68,6 +68,29 @@ gh actions-lock --verify
 with `--migrate-local-actions`. `--verify-local` checks source and recorded
 dependency coverage offline; it does not check current upstream metadata.
 
+To require a lockfile during offline validation, run:
+
+```bash
+gh actions-lock --verify-local --require-lockfile
+```
+
+`--require-lockfile` rejects missing, empty, and symlinked lockfiles, including
+symlinked path components within the repository, even for shell-only workflows.
+
+For execution independent of runtime lockfile enforcement, use full commit SHAs
+for every remote `uses:` reference, including transitive children, then run:
+
+```bash
+gh actions-lock --verify-frozen
+```
+
+This authenticated, read-only check requires a lockfile and inspects action and
+reusable workflow manifests at their defining commits. Missing dependencies,
+mutable references, invalid manifests, and inconclusive checks fail validation.
+It follows repository-relative and `$/…` dependencies and requires full SHA-256
+digests for `docker://` action uses. It cannot be combined with `--verify-local`
+or modes that update or migrate dependencies.
+
 Pins to branches or partial versions (e.g. `main`, `v4`) are not advanced when
 upstream moves. To regenerate the lockfile from the current upstream commits,
 run:
@@ -186,6 +209,15 @@ blocks those consumers. Validation inside a consumer's first step starts after
 action preparation. Full-SHA references provide additional protection, but a
 pinned parent can still declare mutable remote children.
 
+The repository's CI and release workflows now use separate action-free gates
+with `--verify-frozen` before consumers run. A trusted policy workflow validates
+exact PR head and merge revisions and posts the `Lock policy` status. Remote
+references use full SHAs, including the vendored release composite's children.
+The staged pre-commit hook, ownership rules, exact external allowlist, and
+repository setup script are described in [Actions lock protections](./docs/actions-protection.md).
+Repository administration settings have not yet been applied; upstream #125
+remains open.
+
 ## How it works
 
 A repo gets a lockfile at [`.github/workflows/actions.lock`](https://github.com/github/gh-actions-lock/blob/main/.github/workflows/actions.lock), and workflows are onboarded individually.
@@ -210,6 +242,10 @@ coverage. Workflows using them report incomplete coverage and are not newly
 onboarded. Existing recorded pins are preserved, and other remote dependencies
 are still checked. Generated or caller-modified actions need a dependency model
 beyond static repository metadata.
+
+Frozen verification covers GitHub action and reusable workflow dependencies
+and `docker://` action uses. Arbitrary Dockerfile dependencies, job containers,
+services, shell downloads, and installed tools are outside this dependency graph.
 
 ## License
 

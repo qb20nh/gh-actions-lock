@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""Check raw candidate materialization against Git export and checkout rules."""
+
+import importlib.machinery
+import importlib.util
+from pathlib import Path
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import unittest
+
+
+sys.dont_write_bytecode = True
+loader = importlib.machinery.SourceFileLoader("materialize", str(Path(__file__).with_name("materialize-git-tree")))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+materializer = importlib.util.module_from_spec(spec)
+loader.exec_module(materializer)
+
+
+@unittest.skipUnless(shutil.which("git"), "materialization needs git")
+class MaterializerTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.repository = self.root / "source"
+        self.repository.mkdir()
+        self.git("init", "-q")
+
+    def git(self, *args, input=None):
+        return subprocess.check_output(["git", "-C", str(self.repository), *args], input=input)
+
+    def tree(self):
+        self.git("add", "--force", ".")
+        return self.git("write-tree").decode().strip()
+
+    def test_raw_bytes_ignore_export_encoding_and_filter_attributes(self):
+        files = {"hidden.yml": b"version: [malformed\n", "encoded.txt": b"raw UTF-8 bytes\n",
+                 "subst.txt": b"$Format:%H$\n", "filtered.txt": b"INVALID\n"}
+        for path, content in files.items():
+            (self.repository / path).write_bytes(content)
+        (self.repository / "executable").write_bytes(b"#!/bin/sh\nexit 0\n")
+        (self.repository / "executable").chmod(0o755)
+        (self.repository / "link").symlink_to("hidden.yml")
+        self.git("add", ".")
+        (self.repository / ".gitattributes").write_text(
+            "hidden.yml export-ignore\nencoded.txt working-tree-encoding=UTF-16LE\n"
+            "subst.txt export-subst\nfiltered.txt filter=disguise\n")
+        self.git("config", "filter.disguise.smudge", "sed s/INVALID/valid/g")
+        self.git("add", ".gitattributes")
+        tree = self.git("write-tree").decode().strip()
+        destination = self.root / "destination"
+        materializer.materialize(self.repository, tree, destination)
+        for path, content in files.items():
+            with self.subTest(path=path):
+                self.assertEqual((destination / path).read_bytes(), content)
+        self.assertEqual((destination / "link").readlink(), Path("hidden.yml"))
+        self.assertEqual(stat.S_IMODE((destination / "executable").stat().st_mode), 0o755)
+        self.assertEqual(stat.S_IMODE((destination / "encoded.txt").stat().st_mode), 0o644)
+
+    def test_default_destination_preserves_the_fetched_repository(self):
+        (self.repository / "data").write_bytes(b"raw\0blob\n")
+        tree = self.tree()
+        destination = self.root / "fetched"
+        shutil.copytree(self.repository / ".git", destination / ".git")
+        config = (destination / ".git/config").read_bytes()
+        subprocess.run([str(Path(__file__).with_name("materialize-git-tree")), str(destination), tree], check=True)
+        self.assertEqual((destination / "data").read_bytes(), b"raw\0blob\n")
+        self.assertEqual((destination / ".git/config").read_bytes(), config)
+
+    def test_existing_files_and_symlink_destinations_are_rejected_before_writes(self):
+        (self.repository / "data").write_text("new data")
+        tree = self.tree()
+        destination = self.root / "destination"
+        destination.mkdir()
+        (destination / "existing").write_text("retain me")
+        with self.assertRaises(ValueError):
+            materializer.materialize(self.repository, tree, destination)
+        self.assertEqual((destination / "existing").read_text(), "retain me")
+        self.assertFalse((destination / "data").exists())
+        linked = self.root / "linked"
+        linked.symlink_to(destination, target_is_directory=True)
+        with self.assertRaises(ValueError):
+            materializer.materialize(self.repository, tree, linked)
+
+    def test_unsafe_sha_and_reserved_git_paths_are_rejected(self):
+        with self.assertRaises(ValueError):
+            materializer.materialize(self.repository, "HEAD", self.root / "destination")
+        blob = self.git("hash-object", "-w", "--stdin", input=b"unsafe")
+        tree = self.git("mktree", input=b"100644 blob " + blob.strip() + b"\t.git\n").decode().strip()
+        with self.assertRaises(ValueError):
+            materializer.materialize(self.repository, tree, self.root / "destination")
+
+    def test_malformed_tree_cannot_write_through_a_symlink(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        link = self.git("hash-object", "-w", "--stdin", input=str(outside).encode()).strip()
+        blob = self.git("hash-object", "-w", "--stdin", input=b"must stay inside").strip()
+        child = self.git("mktree", input=b"100644 blob " + blob + b"\tdata\n").strip()
+        tree = self.git("mktree", input=b"120000 blob " + link + b"\tparent\n040000 tree " + child + b"\tparent\n").decode().strip()
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            materializer.materialize(self.repository, tree, self.root / "destination")
+        self.assertEqual(list(outside.iterdir()), [])
+
+
+if __name__ == "__main__":
+    unittest.main()

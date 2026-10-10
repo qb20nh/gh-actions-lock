@@ -2,16 +2,18 @@
 
 GitHub currently ignores syntactically malformed lock YAML in the reproduced
 upstream [#125](https://github.com/github/gh-actions-lock/issues/125) case.
-The workflows validate the exact candidate revision in a separate,
-action-free job before consumers can execute. The trusted validator publishes
+The workflows fetch the exact candidate revision and read its raw Git blobs in a
+separate, action-free job before consumers can execute. Export attributes and
+checkout filters cannot hide or rewrite tracked workflows. The trusted validator publishes
 the `Lock policy` status for the revision it inspected. CI and release consumers
 must require successful validation, including PR merge revisions and merge
 queue revisions.
 
 The source graph also uses full commit SHAs. `--verify-frozen` audits remote
 manifests recursively so pinning a parent cannot hide a mutable remote child.
-Same-commit `$/` references remain bound to their defining source. Image tags,
-shell downloads, and tool installation have separate trust boundaries.
+Same-commit `$/` references remain bound to their defining source. Declared
+`docker://` actions require full SHA-256 digests. Dockerfile images, job and service
+containers, shell downloads, and tool installation have separate trust boundaries.
 
 ## Enable repository settings
 
@@ -84,7 +86,9 @@ The pre-commit hook builds the current verifier and checks the exact staged
 workflow/lock snapshot with `--require-lockfile --verify-local`, including
 partially staged files, and requires full-SHA refs matching their recorded commits
 throughout the inspected inventory. This offline check cannot discover remote
-edges omitted from the recorded graph. It needs Go, Git, Python 3, `tar`, and `rg`, and uses no token or
+edges omitted from the recorded graph. It copies raw index blobs so ignore rules,
+archive export attributes, and checkout filters cannot remove or rewrite tracked
+files during validation. It needs Go, Git, Python 3, and Bash, and uses no token or
 network for lock verification. A build may need to download uncached Go modules.
 It does not repair or stage files automatically.
 
@@ -105,3 +109,4 @@ administration writes.
 - [Branch protection REST API](https://docs.github.com/en/rest/branches/branch-protection)
 - [Repository action policy limits](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository)
 - [Hosted workaround evidence](../test/runtime/evidence/2026-10-10-workarounds.md)
+- [Implemented combo validation](../test/runtime/evidence/2026-10-11-combo.md)

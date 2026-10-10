@@ -1000,7 +1000,7 @@ scenarios:
 
   - name: local_action_only
     category: workflow_parsing
-    description: "Workflow with only local path actions (no remote refs) — skipped cleanly"
+    description: "Workflow with only workspace-relative local actions has incomplete coverage and writes nothing"
     needs_token: true
     fixtures:
       workflows:
@@ -1015,7 +1015,8 @@ scenarios:
                   - uses: ./.github/actions/my-action
                   - uses: ./.github/actions/other-action
     expect:
-      exit: 0
+      exit: 1
+      output_contains: ["coverage is incomplete", "Nothing was written"]
 
   - name: self_hosted_runner_pinned
     category: workflow_parsing
@@ -1752,7 +1753,7 @@ scenarios:
             valid: true
   - name: dbot_not_pinned
     category: dependabot
-    description: "Onboarded workflow with new action — onboarding-required under --no-onboard"
+    description: "A new action in an onboarded workflow blocks --no-onboard because its lockfile coverage is incomplete"
     needs_token: true
     flags: ["--no-onboard", "--no-narrow", "--no-interactive", "--no-fix", "--json=valid,findings,workflows"]
     fixtures:
@@ -1762,13 +1763,13 @@ scenarios:
           actions: ["actions/checkout@v4", "actions/setup-node@v4"]
       lockfile_template: pinned_checkout
     expect:
-      exit: 0
+      exit: 1
       stdout_is_json: true
       jq:
         - expr: ".valid"
-          equals: "true"
+          equals: "false"
         - expr: '.findings[] | select(.category == "onboarding-required") | .severity'
-          equals: "info"
+          equals: "error"
         - expr: '.findings[] | select(.category == "onboarding-required") | .dependency'
           contains: "actions/setup-node"
 
@@ -1781,10 +1782,10 @@ scenarios:
             detail: actions/setup-node@v4 has no lockfile entry; --no-onboard refuses to add new workflows or actions
             doc_url: "https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-third-party-actions"
             remediation: onboard it first with `gh actions-lock` (without --no-onboard)
-            severity: info
+            severity: error
             workflow: .github/workflows/ci.yml
         lockfile_version: v0.0.3
-        valid: true
+        valid: false
         workflows:
           - dependencies:
               - direct: true
@@ -1799,10 +1800,10 @@ scenarios:
                 detail: actions/setup-node@v4 has no lockfile entry; --no-onboard refuses to add new workflows or actions
                 doc_url: "https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-third-party-actions"
                 remediation: onboard it first with `gh actions-lock` (without --no-onboard)
-                severity: info
+                severity: error
                 workflow: .github/workflows/ci.yml
             path: .github/workflows/ci.yml
-            valid: true
+            valid: false
   - name: dbot_corrupt_lockfile_ci
     category: dependabot
     description: "Corrupt lockfile with --no-interactive — exit 2, engine error"

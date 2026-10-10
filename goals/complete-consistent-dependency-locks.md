@@ -4,9 +4,9 @@ Deliver reviewable fixes so verification reports dependency coverage accurately,
 
 - **Repository:** [github/gh-actions-lock](https://github.com/github/gh-actions-lock)
 - **Assessment baseline:** `3f7c302310dde7556291a2ce0792de36ec41a4c8`
-- **Status:** CLI implementation, hosted checks, draft release, uploaded-binary verification, and positive runtime probes pass. M6 is blocked on upstream #125's runtime rejection of malformed YAML locks.
+- **Status:** CLI implementation and the repository-controlled #125 workaround combo are implemented and tested. M6 remains open for upstream runtime rejection and deployment of repository protections.
 - **Progress:** 5 of 6 milestones complete.
-- **Last validated:** 2026-10-10.
+- **Last validated:** 2026-10-11 KST.
 - **Delivery:** [Isolated implementation branch](https://github.com/qb20nh/gh-actions-lock/tree/codex/m6-implementation-20261010), [published evidence branch](https://github.com/qb20nh/gh-actions-lock/tree/codex/m6/evidence-20261010), and an attested draft prerelease. Upstream merge remains separate.
 - **Execution order:** M1 → M2 → M3 → M4 → M5 → M6.
 
@@ -92,7 +92,20 @@ Deliver reviewable fixes so verification reports dependency coverage accurately,
 
   **Locally controllable workaround:** A separate validator job with no actions, container, or services [rejected committed malformed YAML](https://github.com/qb20nh/gh-actions-lock/actions/runs/38058973704), and its dependent consumer was skipped. The [valid control](https://github.com/qb20nh/gh-actions-lock/actions/runs/38058951167) passed and executed the consumer. [Probe workflow](../test/runtime/workflows/m6-workarounds.yml) builds an immutable trusted verifier and reads the exact candidate commit as data. Independent probes confirm direct-SHA protection and show that the same pinned parent downloads different mutable children when lock enforcement is absent. [Workaround assessment](../test/runtime/evidence/2026-10-10-workarounds.md) ranks gates, protected checks, SHA policies, graph freezing, and runner-side options.
 
-  **Mitigation follow-up:** Integrate the proven gate into normal CI/release workflows and require it on protected branches; define exact source/result binding for PR, merge-group, tag, and reusable events; then assess SHA policies and complete-graph freeze tooling. Acceptance requires valid inputs to pass, malformed/missing locks to reject, and every dependent consumer to remain unexecuted on rejection. These local improvements can proceed while #125 remains open; they do not replace the original platform-enforcement completion criterion.
+  **Workaround combo:** [Implementation and evidence](../test/runtime/evidence/2026-10-11-combo.md) and [activation instructions](../docs/actions-protection.md).
+
+  - [x] Add an action-free trusted validator and gate all CI/release consumers on success.
+  - [x] Require a nonempty regular lock and verify the actual defining-commit dependency graph with full SHAs; reject missing edges and inconclusive inspection.
+  - [x] Freeze every active remote reference and vendor the release composite's mutable children, preserving build and attestation behavior.
+  - [x] Materialize raw Git blobs so ignored tracked files, export attributes, and checkout filters cannot alter validation inputs.
+  - [x] Enable the local staged-file hook and verify malformed/missing locks, direct/recorded-child tags, and ignored/export-ignored workflows.
+  - [x] Publish exact-revision policy statuses and test valid, malformed, missing, omitted-child, export-ignore, and release-negative controls on GitHub.
+  - [x] Prepare CODEOWNERS, an exact SHA allowlist, and an idempotent administration script preserving existing protections.
+  - [ ] Validate PR head and merge status binding on a hosted PR and rerun the corrected full live catalog.
+  - [ ] Deploy the policy to the protected/default branch and apply required checks, SHA policy, and exact allowlist with an administration credential. Current connector/shell capabilities cannot apply settings.
+  - [ ] Re-run platform malformed-lock rejection after the upstream #125 fix; require an explicit lock error and no execution sentinel.
+
+  Repository gating mitigates #125 for the covered consumers. It does not replace the original platform-enforcement completion criterion or claim to freeze arbitrary container images and shell downloads.
 
   | Upstream reference | Effect on release scope | Completion evidence |
   | --- | --- | --- |
