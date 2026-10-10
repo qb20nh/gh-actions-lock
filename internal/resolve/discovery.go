@@ -149,6 +149,16 @@ const batchActionFileSize = 20
 // The returned ParentMap (child dep key → parent dep keys) is owned by the
 // caller and safe to mutate or hold across concurrent resolver calls.
 func (r *Resolver) ResolveAllRecursive(ctx context.Context, refs []parserlock.ActionRef) ([]dep.Dependency, dep.ParentMap, error) {
+	return r.resolveAllRecursive(ctx, refs, false)
+}
+
+// InspectAllRecursive fetches manifests even for pins seeded from a lockfile.
+// Cached manifests fetched from their defining commits remain reusable.
+func (r *Resolver) InspectAllRecursive(ctx context.Context, refs []parserlock.ActionRef) ([]dep.Dependency, dep.ParentMap, error) {
+	return r.resolveAllRecursive(ctx, refs, true)
+}
+
+func (r *Resolver) resolveAllRecursive(ctx context.Context, refs []parserlock.ActionRef, requireMetadata bool) ([]dep.Dependency, dep.ParentMap, error) {
 	seen := make(map[ghapi.ActionRef]bool)
 	var allDeps []dep.Dependency
 	resolvedPins := make(map[string]string)
@@ -215,7 +225,7 @@ func (r *Resolver) ResolveAllRecursive(ctx context.Context, refs []parserlock.Ac
 		var deps []dep.Dependency
 		var actionYMLs []string
 		var err error
-		deps, actionYMLs, err = r.resolveWithActionYMLParallel(ctx, toResolve, depth, &resolveDone, &resolveTotal)
+		deps, actionYMLs, err = r.resolveWithActionYMLParallel(ctx, toResolve, depth, &resolveDone, &resolveTotal, requireMetadata)
 		if depth > 0 {
 			// A remote composite's `uses:` can't be rewritten here, and the
 			// runner looks it up as written, so keep the name it uses.
@@ -315,6 +325,9 @@ func (r *Resolver) ResolveAllRecursive(ctx context.Context, refs []parserlock.Ac
 						}
 					}
 					if actionRef == nil {
+						if requireMetadata && strings.HasPrefix(use, "docker://") && !workflowfile.IsImmutableDockerRef(use) {
+							resolveErr = errors.Join(resolveErr, &InvalidMetadataError{Parent: parentKey, Err: fmt.Errorf("container action %q does not use a full SHA-256 digest", use)})
+						}
 						if !site.StepLevel || !strings.HasPrefix(use, "docker://") {
 							resolveErr = errors.Join(resolveErr, &InvalidMetadataError{Parent: parentKey, Err: fmt.Errorf("invalid dependency reference %q", use)})
 						}
@@ -435,7 +448,7 @@ func dependencyUses(d dep.Dependency, content string) ([]workflowfile.UseSite, e
 // resolveDone and resolveTotal are rolling counters owned by ResolveAllRecursive
 // that span every BFS depth, so a single non-jumping progress bar can cover
 // direct + transitive resolution as one phase.
-func (r *Resolver) resolveWithActionYMLParallel(ctx context.Context, refs []resolutionRequest, depth int, resolveDone, resolveTotal *atomic.Int64) ([]dep.Dependency, []string, error) {
+func (r *Resolver) resolveWithActionYMLParallel(ctx context.Context, refs []resolutionRequest, depth int, resolveDone, resolveTotal *atomic.Int64, requireMetadata bool) ([]dep.Dependency, []string, error) {
 	type resolveResult struct {
 		dep dep.Dependency
 		yml string
@@ -449,6 +462,9 @@ func (r *Resolver) resolveWithActionYMLParallel(ctx context.Context, refs []reso
 		if !ok && request.fetchRef != "" {
 			entry, ok = r.cache.Get(cacheKey(request.ref))
 			ok = ok && strings.EqualFold(entry.dep.SHA, request.fetchRef)
+		}
+		if requireMetadata && entry.actionYML == "" {
+			ok = false
 		}
 		if ok {
 			d := entry.dep

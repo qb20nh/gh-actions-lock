@@ -20,6 +20,8 @@ type RunOptions struct {
 	Pool          *pinpool.Pool
 	// Relock re-resolves every ref live instead of trusting the lockfile.
 	Relock bool
+	// VerifyFrozen inspects the complete defining-commit graph and fails closed.
+	VerifyFrozen bool
 
 	// Resolver UX hooks — set these for interactive spinner mode.
 	OnResolveProgress func(done, total int)
@@ -43,6 +45,9 @@ func Run(ctx context.Context, opts RunOptions) (*RunResult, error) {
 	endParse := prof.Phase("  parse workflows")
 	parsed := ParseAll(opts.WorkflowPaths, opts.Store)
 	endParse()
+	if opts.VerifyFrozen {
+		return verifyFrozen(ctx, opts, parsed)
+	}
 
 	if ctx.Err() != nil {
 		return nil, ctx.Err()

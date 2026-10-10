@@ -23,8 +23,11 @@ import (
 // applyVerifyFlags expands --verify into its constituent flags. Called at the
 // top of runCheck before any work begins.
 func applyVerifyFlags(opts *checkOptions) {
-	if opts.verify {
+	if opts.verify || opts.verifyFrozen {
 		opts.noFix = true
+	}
+	if opts.verifyFrozen {
+		opts.requireLockfile = true
 	}
 }
 

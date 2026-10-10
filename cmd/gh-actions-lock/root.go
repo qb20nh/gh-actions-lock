@@ -119,7 +119,14 @@ touched. Only refs that parse as semantic versions (v4, v3.2) are
 candidates; branch names (main, canary) and non-version tags are
 never narrowed because the latest semver release in a repo may have
 nothing to do with the ref the workflow intended.
-Pass --no-narrow to disable this behavior entirely.
+Pass --no-narrow to disable this behavior entirely and preserve explicit
+commit SHA references.
+
+For execution independent of lockfile enforcement, use full commit SHAs
+throughout the dependency graph and run --verify-frozen. This read-only,
+authenticated mode inspects action and reusable workflow manifests at their
+defining commits, rejects mutable child refs, and requires a nonempty regular
+lockfile. Use --verify-local --require-lockfile for an offline pre-commit check.
 
 --json selects the output format only (independent of --no-fix);
 structured results go to stdout and progress to stderr:

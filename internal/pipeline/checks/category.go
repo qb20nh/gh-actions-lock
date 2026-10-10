@@ -8,6 +8,8 @@ package checks
 type Category string
 
 const (
+	// MutableReference means execution depends on a remote tag or branch.
+	MutableReference Category = "mutable-reference"
 	// NotPinned means the workflow has action refs but no
 	// corresponding dependencies entry in the lockfile.
 	NotPinned Category = "not-pinned"

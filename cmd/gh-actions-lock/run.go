@@ -66,6 +66,10 @@ type checkOptions struct {
 	// in scanned workflows must have a corresponding lockfile entry.
 	// No auth, no resolution, no reachability — ideal for pre-commit hooks.
 	verifyLocal bool
+	// verifyFrozen checks the actual dependency manifests for immutable refs.
+	verifyFrozen bool
+	// requireLockfile refuses an absent, empty, or symlinked lockfile.
+	requireLockfile bool
 	// migrateLocalActions explicitly changes workspace-relative action references
 	// to defining-repository references after the user has checked equivalence.
 	migrateLocalActions   bool
@@ -79,7 +83,7 @@ func bindCheckFlags(cmd *cobra.Command, opts *checkOptions) {
 	cmd.Flags().StringVar(&opts.hostname, "hostname", "", "GitHub hostname to query (defaults to GH_HOST, current repo host, or github.com)")
 	cmd.Flags().BoolVar(&opts.noFix, "no-fix", false, "Read-only: report findings without modifying workflows or the lockfile")
 	cmd.Flags().BoolVar(&opts.noNarrow, "no-narrow", false,
-		"Keep mutable version refs (e.g. v4) instead of narrowing to full semver (e.g. v4.2.1).\n"+
+		"Preserve explicit commit SHAs and keep mutable refs instead of narrowing to full semver.\n"+
 			"Only refs that parse as semantic versions are narrowed (v4, v4.2); branch names\n"+
 			"like 'main' or non-version tags are never narrowed because a full semver tag is\n"+
 			"far more likely to resolve to exactly one commit for its entire lifetime.")
@@ -91,6 +95,10 @@ func bindCheckFlags(cmd *cobra.Command, opts *checkOptions) {
 	cmd.Flags().BoolVar(&opts.verifyLocal, "verify-local", false,
 		"Offline lockfile coverage check: verify every action ref has a lockfile entry.\n"+
 			"No network calls, no authentication required — ideal for pre-commit hooks.")
+	cmd.Flags().BoolVar(&opts.verifyFrozen, "verify-frozen", false,
+		"Read-only authenticated check: require a lockfile and full commit SHA refs throughout the discovered dependency graph")
+	cmd.Flags().BoolVar(&opts.requireLockfile, "require-lockfile", false,
+		"Require a nonempty regular lockfile with no symlinked path components")
 	cmd.Flags().StringVar(&opts.profileDir, "profile", "", "Enable profiling: write trace, CPU profile, and HTTP log to `dir`")
 	cmd.Flags().BoolVar(&opts.migrateLocalActions, "migrate-local-actions", false,
 		"Rewrite selected same-repo ./ action references to $/; confirm checkout and generated-file semantics before enabling")
@@ -106,6 +114,12 @@ func (opts *checkOptions) validateOutputFlags() error {
 	}
 	if opts.verify && opts.verifyLocal {
 		return fmt.Errorf("--verify and --verify-local are mutually exclusive")
+	}
+	if opts.verifyFrozen && opts.verifyLocal {
+		return fmt.Errorf("--verify-frozen and --verify-local are mutually exclusive")
+	}
+	if opts.verifyFrozen && (opts.acceptMoved || opts.relock || opts.migrateLocalActions) {
+		return fmt.Errorf("--verify-frozen cannot be combined with --accept-moved, --relock, or --migrate-local-actions")
 	}
 	if opts.verifyLocal && (opts.acceptMoved || opts.relock) {
 		return fmt.Errorf("--verify-local cannot be combined with --accept-moved or --relock because it runs offline")
@@ -128,6 +142,11 @@ func runCheck(cmd *cobra.Command, opts *checkOptions, newResolver resolverFunc) 
 
 	// Expand verify mode flags (see verify.go for both modes).
 	applyVerifyFlags(opts)
+	if opts.requireLockfile {
+		if err := requireLockfile(); err != nil {
+			return err
+		}
+	}
 
 	// --verify-local: offline static coverage check. Skip all network setup.
 	if opts.verifyLocal {
@@ -232,7 +251,7 @@ func runCheck(cmd *cobra.Command, opts *checkOptions, newResolver resolverFunc) 
 	// Locked refs are sticky: resolve them from the lockfile. --accept-moved
 	// and --relock must see what moved, so they resolve everything live.
 	relock := opts.acceptMoved || opts.relock
-	if !relock {
+	if !relock && !opts.verifyFrozen {
 		r.SeedFromLockfile(store.AllDeps())
 	}
 	endSetup()
@@ -299,6 +318,7 @@ func runCheck(cmd *cobra.Command, opts *checkOptions, newResolver resolverFunc) 
 		Store:         store,
 		Pool:          pool,
 		Relock:        relock,
+		VerifyFrozen:  opts.verifyFrozen,
 		Profile:       prof,
 	}
 	// Defer spinner start until actual network work begins. The fast path

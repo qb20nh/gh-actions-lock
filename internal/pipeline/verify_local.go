@@ -6,8 +6,10 @@ import (
 	"strings"
 
 	parserlock "github.com/github/actions-lockfile/go/pkg/lockfile"
+	"github.com/github/gh-actions-lock/internal/dep"
 	"github.com/github/gh-actions-lock/internal/lockfile"
 	"github.com/github/gh-actions-lock/internal/pipeline/checks"
+	"github.com/github/gh-actions-lock/internal/workflowfile"
 )
 
 // VerifyLocalCoverage performs a zero-network static check: every action ref
@@ -32,6 +34,7 @@ func VerifyLocalCoverage(parsed []checks.ParsedWorkflow, store *lockfile.State) 
 			SelfActionRefs:  pw.SelfActionRefs,
 			Deps:            pw.ExistingDeps,
 		}
+		populateLocalInventory(&wr, pw, store)
 
 		if pw.LoadErr != nil {
 			wr.Findings = append(wr.Findings, checks.Finding{
@@ -101,4 +104,43 @@ func VerifyLocalCoverage(parsed []checks.ParsedWorkflow, store *lockfile.State) 
 	}
 
 	return &checks.Report{Workflows: results}
+}
+
+func populateLocalInventory(wr *checks.WorkflowReport, pw checks.ParsedWorkflow, store *lockfile.State) {
+	seen := make(map[string]bool)
+	for _, ref := range pw.Refs {
+		d := dep.Dependency{NWO: ref.NWO(), Path: ref.Path, Ref: ref.Ref}
+		for _, locked := range pw.ExistingDeps {
+			if strings.EqualFold(locked.NWO, d.NWO) && (locked.Ref == ref.Ref || strings.EqualFold(locked.SHA, ref.Ref)) {
+				d = locked
+				d.Path, d.Ref = ref.Path, ref.Ref
+				break
+			}
+		}
+		if key := foldKey(d.Key()); !seen[key] {
+			seen[key] = true
+			wr.Inventory = append(wr.Inventory, checks.InventoryEntry{Dep: d, File: pw.Path, Direct: true})
+		}
+	}
+	file := store.File()
+	closure := store.Closure(workflowfile.KeyFromPath(pw.Path), func(pin parserlock.Pin) bool {
+		for _, ref := range pw.Refs {
+			if strings.EqualFold(pin.NWO, ref.NWO()) && (pin.Ref == ref.Ref || strings.EqualFold(lockedSHA(file.Dependencies[pin.String()].Commit), ref.Ref)) {
+				return true
+			}
+		}
+		return false
+	})
+	byKey := make(map[string]dep.Dependency)
+	for _, d := range store.AllDeps() {
+		byKey[foldKey(d.Key())] = d
+	}
+	for _, pin := range closure {
+		key := foldKey(pin.Pin.NWO + "@" + pin.Pin.Ref)
+		if pin.Parent == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		wr.Inventory = append(wr.Inventory, checks.InventoryEntry{Dep: byKey[key], File: pw.Path, Parents: []string{pin.Parent}})
+	}
 }

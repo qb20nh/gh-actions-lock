@@ -56,6 +56,11 @@ func TestApplyVerifyFlags(t *testing.T) {
 	opts = checkOptions{}
 	applyVerifyFlags(&opts)
 	assert.False(t, opts.noFix)
+
+	opts = checkOptions{verifyFrozen: true}
+	applyVerifyFlags(&opts)
+	assert.True(t, opts.noFix)
+	assert.True(t, opts.requireLockfile)
 }
 
 func TestValidateOutputFlags_VerifyConflicts(t *testing.T) {
@@ -78,6 +83,16 @@ func TestValidateOutputFlags_VerifyConflicts(t *testing.T) {
 			name:    "verify-local and relock conflict",
 			opts:    checkOptions{verifyLocal: true, relock: true},
 			wantErr: "offline",
+		},
+		{
+			name:    "frozen and verify-local are mutually exclusive",
+			opts:    checkOptions{verifyFrozen: true, verifyLocal: true},
+			wantErr: "mutually exclusive",
+		},
+		{
+			name:    "frozen refuses ref changes",
+			opts:    checkOptions{verifyFrozen: true, relock: true},
+			wantErr: "--verify-frozen",
 		},
 		{
 			name: "verify alone is valid",
