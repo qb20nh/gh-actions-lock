@@ -40,7 +40,22 @@ The first command prints a read-only plan. Apply only after the default branch
 contains the matching policy and has a successful `Lock policy` status from
 GitHub Actions. The script checks that precondition and the branch revision
 before writing, then reads the settings back. `--branch NAME` selects another
-branch explicitly.
+branch explicitly; the default branch must also be deployed and validated, and
+both branch heads must remain unchanged during setup.
+
+Deploy `.github/workflows/lock-policy.yml` on the repository's **default branch**
+before requiring its status. Since December 8, 2025, `pull_request_target` always
+uses that branch's workflow definition and commit, even when a PR targets a
+different branch. Installing it only on a PR's base branch cannot activate the
+event. The workflow posts separate statuses onto the exact PR head and merge
+commits it validates. See [GitHub's source-selection change](https://github.blog/changelog/2025-11-07-actions-pull_request_target-and-environment-branch-protections-changes/).
+
+Confirm the applicable Actions event policy permits `pull_request_target` for
+this workflow. GitHub's default rule for affected public repositories currently
+evaluates that event and will block it from November 2, 2026 unless an applicable
+policy explicitly allows it. Check the policy and its insights before enabling
+the required status; see [workflow execution protections](https://github.blog/changelog/2026-09-17-workflow-execution-protections-in-github-actions-generally-available/)
+and [secure use of `pull_request_target`](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target).
 
 The plan enables the full-SHA action requirement and replaces the selected
 external allowlist with the reviewed exact references. GitHub-owned and verified
@@ -49,6 +64,15 @@ from GitHub Actions, requires the branch to be current, and enforces checks for
 administrators. Existing unrelated checks, approval rules, restrictions,
 signatures, and repository settings remain in place. A disabled Actions setting
 or an existing local-only policy stops setup for explicit review.
+
+Enable Dependency graph under repository Code security before requiring the
+dependency-review check. The fork's lock gate passes, but the review API currently
+returns 403 and the action reports that the feature is unavailable. The review
+check remains blocking until the feature is enabled and the check is rerun.
+
+When the verifier or raw-tree helper changes, publish and test a new immutable
+bootstrap commit, then update `LOCK_VERIFIER_SHA` in both validator workflows.
+Candidate code is never used to build the trusted verifier.
 
 New branch protection requires PRs with zero approvals, allowing the personal
 repository's sole owner to merge their own reviewed work after checks pass.

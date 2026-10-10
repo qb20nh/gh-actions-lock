@@ -19,7 +19,8 @@ permissions:
 jobs:
   policy:
     # The required context is posted onto the candidate commits below. A
-    # pull_request_target job's native check is associated with the base revision.
+    # pull_request_target runs the default-branch definition; its native check
+    # is associated with that default revision, rather than the PR commits.
     name: Validate lock policy
     runs-on: ubuntu-latest
     timeout-minutes: 20

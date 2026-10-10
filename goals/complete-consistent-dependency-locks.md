@@ -7,7 +7,7 @@ Deliver reviewable fixes so verification reports dependency coverage accurately,
 - **Status:** CLI implementation and the repository-controlled #125 workaround combo are implemented and tested. M6 remains open for upstream runtime rejection and deployment of repository protections.
 - **Progress:** 5 of 6 milestones complete.
 - **Last validated:** 2026-10-11 KST.
-- **Delivery:** [Isolated implementation branch](https://github.com/qb20nh/gh-actions-lock/tree/codex/m6-implementation-20261010), [published evidence branch](https://github.com/qb20nh/gh-actions-lock/tree/codex/m6/evidence-20261010), and an attested draft prerelease. Upstream merge remains separate.
+- **Delivery:** [Draft implementation PR](https://github.com/qb20nh/gh-actions-lock/pull/2), [workaround branch](https://github.com/qb20nh/gh-actions-lock/tree/codex/m6/combo-20261011), [published release evidence](https://github.com/qb20nh/gh-actions-lock/tree/codex/m6/evidence-combo-20261011), and 12 attested draft prerelease binaries from `a23bb9b0d13aad17565ca53d8436f6959acaff6b`. Upstream merge remains separate.
 - **Execution order:** M1 → M2 → M3 → M4 → M5 → M6.
 
 ## Milestones
@@ -101,15 +101,17 @@ Deliver reviewable fixes so verification reports dependency coverage accurately,
   - [x] Enable the local staged-file hook and verify malformed/missing locks, direct/recorded-child tags, and ignored/export-ignored workflows.
   - [x] Publish exact-revision policy statuses and test valid, malformed, missing, omitted-child, export-ignore, and release-negative controls on GitHub.
   - [x] Prepare CODEOWNERS, an exact SHA allowlist, and an idempotent administration script preserving existing protections.
-  - [ ] Validate PR head and merge status binding on a hosted PR and rerun the corrected full live catalog.
-  - [ ] Deploy the policy to the protected/default branch and apply required checks, SHA policy, and exact allowlist with an administration credential. Current connector/shell capabilities cannot apply settings.
+  - [x] Validate real PR head and merge status binding through the hosted policy-script harness; all 103 scenarios pass in the corrected live catalog.
+  - [x] Build 12 attested binaries through the vendored composite and verify the uploaded Linux binary's digest, source attestation, frozen graph and missing-lock rejection.
+  - [ ] Deploy the policy on the default branch, verify actual PRtarget and merge-group delivery, and apply required checks, SHA policy, and exact allowlist with an administration credential. Current connector/shell capabilities cannot apply settings.
+  - [ ] Enable Dependency graph in the fork and rerun the blocking dependency-review check; its lock gate passes but the review API currently returns 403.
   - [ ] Re-run platform malformed-lock rejection after the upstream #125 fix; require an explicit lock error and no execution sentinel.
 
   Repository gating mitigates #125 for the covered consumers. It does not replace the original platform-enforcement completion criterion or claim to freeze arbitrary container images and shell downloads.
 
   | Upstream reference | Effect on release scope | Completion evidence |
   | --- | --- | --- |
-  | [#125 — malformed lock ignored at runtime](https://github.com/github/gh-actions-lock/issues/125) | Reproduced on the hosted service. Strict CLI validation passes, but M6 remains blocked on runtime YAML rejection. | Re-run the committed syntax-negative control after the upstream fix; require an explicit lock error and no sentinel execution. |
+  | [#125 — malformed lock ignored at runtime](https://github.com/github/gh-actions-lock/issues/125) | Reproduced on the hosted service. The repository-controlled combo rejects bad locks before covered consumers execute; activation and platform YAML rejection remain open. | Deploy protections, then re-run the original syntax-negative control after the upstream fix; require an explicit service lock error and no sentinel execution. |
   | [#126 — cross-repository `$/` execution failure](https://github.com/github/gh-actions-lock/issues/126) | Positive probes pass on the recorded deployment; migration remains opt-in because workspace semantics can differ. | Met for this deployment: same/foreign actions and nested reusable workflows bind to the defining commit on hosted runner `2.337.0`. |
   | [#128 — generated local Docker action](https://github.com/github/gh-actions-lock/issues/128), [pypa #425](https://github.com/pypa/gh-action-pypi-publish/issues/425) | Generated workspace actions remain incomplete coverage and cannot be onboarded as complete locks. | Upstream exposes deterministic dependency metadata or defines a supported generated-action model; add discovery and coverage regressions before changing support claims. |
 

@@ -170,8 +170,17 @@ def main(argv=None, github=None):
         print("Read-only plan. Deploy and validate the workflow, then rerun with --apply.")
         return
     tested_sha = deployed_policy(github, args.repo, branch_info, policy)
+    default_endpoint = None
+    default_sha = None
+    if branch != metadata["default_branch"]:
+        # pull_request_target always reads its definition from the default branch.
+        default_endpoint = f"repos/{args.repo}/branches/{quote(metadata['default_branch'], safe='')}"
+        default_info = github.api(default_endpoint)
+        default_sha = deployed_policy(github, args.repo, default_info, policy)
     if github.api(endpoint)["commit"]["sha"] != tested_sha:
         raise PolicyError("branch changed during preflight; rerun against the new head")
+    if default_endpoint and github.api(default_endpoint)["commit"]["sha"] != default_sha:
+        raise PolicyError("default branch changed during preflight; rerun against the new head")
     for index, (method, path, body) in enumerate(plan):
         try:
             github.api(path, method=method, body=body)
