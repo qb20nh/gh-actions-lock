@@ -130,6 +130,13 @@ and JSON combines duplicate outcomes independent of workflow order. The updated
 race/release suite, five materializer tests, 12 protection/hook tests, formatting,
 vet, and all 34 stub scenarios pass. [Review validation log](/workspace/.cloud-setup/gh-actions-lock/review-p2-checks.log).
 
+Hosted [push](https://github.com/qb20nh/gh-actions-lock/actions/runs/38068477007)
+and [PR](https://github.com/qb20nh/gh-actions-lock/actions/runs/38068480748) checks
+pass at `2af5510077cbccfd3ab84b0e7cf9fb947cba08ce`, including all 103 live
+scenarios. The additional setup-preflight API-shape fix uses the status list to
+verify creator identity; all 14 protection/hook tests and a read-only replay of
+the actual successful status list pass.
+
 All checks below passed after the final CLI changes:
 
 | Check | Result | Local execution log |

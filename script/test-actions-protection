@@ -80,10 +80,10 @@ class ProtectionTests(unittest.TestCase):
             def api(self, endpoint):
                 if "/contents/" in endpoint:
                     return {"type": "file", "content": base64.b64encode(json.dumps(POLICY).encode()).decode()}
-                return {"sha": sha, "statuses": [
+                return [
                     {"context": "Lock policy", "state": "failure", "creator": {"login": "github-actions[bot]"}},
                     {"context": "Lock policy", "state": "success", "creator": {"login": "github-actions[bot]"}},
-                ]}
+                ]
 
         with self.assertRaisesRegex(protection.PolicyError, "latest"):
             protection.deployed_policy(API(), "owner/repo", {"commit": {"sha": sha}}, POLICY)
@@ -95,12 +95,64 @@ class ProtectionTests(unittest.TestCase):
             def api(self, endpoint):
                 if "/contents/" in endpoint:
                     return {"type": "file", "content": base64.b64encode(json.dumps(POLICY).encode()).decode()}
-                return {"sha": sha, "statuses": [
+                return [
                     {"context": "Lock policy", "state": "success", "creator": {"login": "owner"}},
-                ]}
+                ]
 
         with self.assertRaises(protection.PolicyError):
             protection.deployed_policy(API(), "owner/repo", {"commit": {"sha": sha}}, POLICY)
+
+    def test_status_list_accepts_latest_actions_success_across_pages(self):
+        sha = "b" * 40
+        success = {"id": 101, "context": "Lock policy", "state": "success",
+                   "creator": {"login": "github-actions[bot]"}}
+        older_pending = {"id": 100, "context": "Lock policy", "state": "pending",
+                         "creator": {"login": "github-actions[bot]"}}
+
+        class API:
+            def __init__(self, paginated):
+                self.paginated = paginated
+                self.status_requests = []
+
+            def api(self, endpoint):
+                if "/contents/" in endpoint:
+                    return {"type": "file", "content": base64.b64encode(json.dumps(POLICY).encode()).decode()}
+                self.status_requests.append(endpoint)
+                first = f"repos/owner/repo/commits/{sha}/statuses?per_page=100&page=1"
+                second = f"repos/owner/repo/commits/{sha}/statuses?per_page=100&page=2"
+                if endpoint == first:
+                    if self.paginated:
+                        return [{"id": index, "context": f"Other check {index}", "state": "failure",
+                                 "creator": {"login": "owner"}} for index in range(100)]
+                    return [success, older_pending]
+                if endpoint == second and self.paginated:
+                    return [success, older_pending]
+                raise AssertionError(endpoint)
+
+        for paginated in (False, True):
+            with self.subTest(paginated=paginated):
+                api = API(paginated)
+                self.assertEqual(protection.deployed_policy(api, "owner/repo", {"commit": {"sha": sha}}, POLICY), sha)
+                self.assertEqual(len(api.status_requests), 2 if paginated else 1)
+
+    def test_unknown_status_creator_is_not_accepted(self):
+        sha = "b" * 40
+
+        class API:
+            def __init__(self, creator):
+                self.creator = creator
+
+            def api(self, endpoint):
+                if "/contents/" in endpoint:
+                    return {"type": "file", "content": base64.b64encode(json.dumps(POLICY).encode()).decode()}
+                status = {"context": "Lock policy", "state": "success"}
+                if self.creator != "missing":
+                    status["creator"] = self.creator
+                return [status]
+
+        for creator in ("missing", None, {}):
+            with self.subTest(creator=creator), self.assertRaises(protection.PolicyError):
+                protection.deployed_policy(API(creator), "owner/repo", {"commit": {"sha": sha}}, POLICY)
 
     def test_unvalidated_default_branch_has_no_writes(self):
         sha = "b" * 40
@@ -120,8 +172,8 @@ class ProtectionTests(unittest.TestCase):
                     return {"enabled": True, "allowed_actions": "all"}
                 if "/contents/" in endpoint:
                     return {"type": "file", "content": base64.b64encode(json.dumps(POLICY).encode()).decode()}
-                if "/status?" in endpoint:
-                    return {"sha": sha, "statuses": []}
+                if "/statuses?" in endpoint:
+                    return []
                 raise AssertionError(endpoint)
 
         api = API()
@@ -174,10 +226,9 @@ class ProtectionTests(unittest.TestCase):
                     if endpoint.endswith("ref=" + default_sha) and not self.deployed:
                         raise protection.PolicyError("default branch policy is not deployed")
                     return {"type": "file", "content": base64.b64encode(json.dumps(POLICY).encode()).decode()}
-                if "/status?" in endpoint:
-                    sha = default_sha if default_sha in endpoint else tested_sha
-                    return {"sha": sha, "statuses": [{"context": "Lock policy", "state": "success",
-                                                      "creator": {"login": "github-actions[bot]"}}]}
+                if "/statuses?" in endpoint:
+                    return [{"context": "Lock policy", "state": "success",
+                             "creator": {"login": "github-actions[bot]"}}]
                 raise AssertionError(endpoint)
 
         for name, deployed, changed in [("undeployed default", False, False), ("changed default", True, True)]:
