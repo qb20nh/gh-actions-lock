@@ -24,6 +24,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       M6_TESTED_SHA: 34c65ecf262f580f066bf1d105a2ecc310226374
       M6_TAG: m6-34c65ecf262f580f066bf1d105a2ecc310226374
+      M6_RELEASE_ID: 408980287
       M6_ASSET_SHA256: 0281e7f65c40b38f799d6392b185274b737a12a4163362a2390c6468c942276e
     steps:
       - uses: actions/checkout@v6.0.2
@@ -42,7 +43,8 @@ jobs:
           mkdir -p "$RUNNER_TEMP/m6-release"
           gh release download "$M6_TAG" --repo "$GITHUB_REPOSITORY" \
             --pattern linux-amd64 --dir "$RUNNER_TEMP/m6-release"
-          m6_api_digest="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${M6_TAG}" \
+          # GitHub's release-by-tag endpoint omits drafts; address this draft by ID.
+          m6_api_digest="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${M6_RELEASE_ID}" \
             --jq '.assets[] | select(.name == "linux-amd64") | .digest')"
           test "$m6_api_digest" = "sha256:${M6_ASSET_SHA256}"
           printf '%s  %s\n' "$M6_ASSET_SHA256" "$RUNNER_TEMP/m6-release/linux-amd64" | sha256sum --check
