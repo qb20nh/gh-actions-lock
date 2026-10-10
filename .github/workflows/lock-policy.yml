@@ -27,7 +27,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       LOCK_VERIFIER_REPOSITORY: qb20nh/gh-actions-lock
       # Trusted verifier with required-lock and defining-commit graph checks.
-      LOCK_VERIFIER_SHA: c9ef9b24670eeddcb0a545d071e30f276cd792e5
+      LOCK_VERIFIER_SHA: 568368f04df85de69e9194610f87c4f9af58b8bf
       LOCK_EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       LOCK_EVENT_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
       LOCK_WORKFLOW_SHA: ${{ github.workflow_sha }}
@@ -135,34 +135,36 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$RUNNER_TEMP/lock-gitconfig" GIT_TERMINAL_PROMPT=0
+          : > "$GIT_CONFIG_GLOBAL"
+          git config --global core.hooksPath /dev/null
+          git config --global init.templateDir ''
+          git config --global protocol.file.allow never
+          git config --global protocol.ext.allow never
+          gh auth setup-git --hostname github.com
           while IFS=$'\t' read -r lock_repository lock_sha; do
             [[ "$lock_repository" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]
             [[ "$lock_sha" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]
-            lock_candidate="$RUNNER_TEMP/lock-candidate-$lock_sha"
-            mkdir -p "$lock_candidate"
-            gh api "repos/$lock_repository/tarball/$lock_sha" > "$lock_candidate.tar.gz"
-            python3 - "$lock_candidate.tar.gz" "$lock_candidate" <<'PY'
+            lock_candidate="$RUNNER_TEMP/lock-candidate-$lock_sha-source"
+            git init -q --template= "$lock_candidate"
+            git -C "$lock_candidate" fetch --depth=1 --no-tags "https://github.com/$lock_repository.git" "$lock_sha"
+            test "$(git -C "$lock_candidate" rev-parse --verify 'FETCH_HEAD^{commit}')" = "$lock_sha"
+            git -C "$lock_candidate" read-tree "$lock_sha"
+            "$RUNNER_TEMP/lock-verifier-source/script/materialize-git-tree" "$lock_candidate" "$lock_sha"
+            python3 - "$lock_candidate" <<'PY'
           import pathlib
           import sys
-          import tarfile
 
-          with tarfile.open(sys.argv[1], "r:gz") as archive:
-              archive.extractall(sys.argv[2], filter="data")
-          roots = list(pathlib.Path(sys.argv[2]).iterdir())
-          if len(roots) != 1 or not roots[0].is_dir() or roots[0].is_symlink():
-              raise SystemExit("Unexpected candidate archive layout")
-          root = roots[0]
+          root = pathlib.Path(sys.argv[1])
           for relative in (".github", ".github/workflows", ".github/workflows/actions.lock", ".github/workflows/lock-policy.yml"):
               path = root / relative
               if path.is_symlink():
                   raise SystemExit(f"Symlinked validation input: {relative}")
           if not (root / ".github/workflows/lock-policy.yml").is_file():
               raise SystemExit("The required policy workflow is missing")
-          root.rename(pathlib.Path(sys.argv[2]).with_name(pathlib.Path(sys.argv[2]).name + "-source"))
           PY
             (
-              cd "$lock_candidate-source"
-              git init -q
+              cd "$lock_candidate"
               if ! "$RUNNER_TEMP/lock-verify" --hostname github.com --require-lockfile --verify-frozen \
                 --json=valid,findings > "$RUNNER_TEMP/lock-verification-$lock_sha.json"; then
                 cat "$RUNNER_TEMP/lock-verification-$lock_sha.json"

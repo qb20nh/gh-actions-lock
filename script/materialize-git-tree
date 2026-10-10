@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Copy raw Git tree blobs into a fresh directory without checkout attributes."""
+
+import argparse
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+
+def materialize(repository, tree, directory):
+    if not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", tree):
+        raise ValueError("tree must be a full commit or tree SHA")
+    root = Path(directory)
+    if root.is_symlink():
+        raise ValueError("destination must not be a symlink")
+    root.mkdir(parents=True, exist_ok=True)
+    root = root.resolve()
+    if any(path.name != ".git" or path.is_symlink() or not path.is_dir() for path in root.iterdir()):
+        raise ValueError("destination must be empty except for its trusted .git directory")
+    command = ["git", "-C", str(repository)]
+    entries = subprocess.check_output(command + ["ls-tree", "--full-tree", "-rz", tree]).split(b"\0")
+    with subprocess.Popen(command + ["cat-file", "--batch"], stdin=subprocess.PIPE, stdout=subprocess.PIPE) as blobs:
+        try:
+            for entry in entries:
+                if not entry:
+                    continue
+                metadata, raw_path = entry.split(b"\t", 1)
+                mode, kind, sha = metadata.split()
+                relative = Path(os.fsdecode(raw_path))
+                if (relative.is_absolute() or not relative.parts
+                        or any(part in (".", "..") or part.lower() == ".git" for part in relative.parts)):
+                    raise ValueError("unsafe path in Git tree")
+                parent = root
+                for part in relative.parts[:-1]:
+                    parent /= part
+                    if parent.is_symlink() or (parent.exists() and not parent.is_dir()):
+                        raise ValueError("Git tree path traverses a non-directory or symlink")
+                    parent.mkdir(exist_ok=True)
+                target = parent / relative.name
+                if target.exists() or target.is_symlink():
+                    raise ValueError("duplicate path in Git tree")
+                if kind == b"commit" and mode == b"160000":
+                    target.mkdir()  # Submodule contents are outside the tree snapshot.
+                    continue
+                if kind != b"blob" or mode not in (b"100644", b"100755", b"120000"):
+                    raise ValueError("unsupported file type in Git tree")
+                blobs.stdin.write(sha + b"\n")
+                blobs.stdin.flush()
+                header = blobs.stdout.readline().split()
+                if len(header) != 3 or header[0] != sha or header[1] != b"blob":
+                    raise ValueError("could not read a Git tree blob")
+                length = int(header[2])
+                content = blobs.stdout.read(length)
+                if len(content) != length or blobs.stdout.read(1) != b"\n":
+                    raise ValueError("incomplete Git tree blob")
+                if mode == b"120000":
+                    target.symlink_to(os.fsdecode(content))
+                else:
+                    target.write_bytes(content)
+                    target.chmod(0o755 if mode == b"100755" else 0o644)
+        finally:
+            blobs.stdin.close()
+        if blobs.wait() != 0:
+            raise ValueError("Git tree blob extraction failed")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("repository", help="repository containing the fetched Git objects")
+    parser.add_argument("tree", help="full commit or tree SHA to materialize")
+    parser.add_argument("directory", nargs="?", help="fresh destination; defaults to repository")
+    args = parser.parse_args()
+    materialize(args.repository, args.tree, args.directory or args.repository)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        sys.exit(1)
