@@ -1,0 +1,14 @@
+name: Omitted mutable child negative
+on: workflow_dispatch
+jobs:
+  lock-validation:
+    uses: ./.github/workflows/lock-validation.yml
+    with:
+      source-sha: ${{ github.workflow_sha }}
+      workflow-path: .github/workflows/frozen-transitive-probe.yml
+  consumer:
+    needs: lock-validation
+    if: needs.lock-validation.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: qb20nh/transition-test/test/runtime/actions/mutable-child-wrapper@93652f3e19efae7f268e56fc64dc774af069a02e

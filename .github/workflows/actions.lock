@@ -22,6 +22,8 @@ workflows:
     '.github/workflows/test.yml':
         - 'actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd'
         - 'actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c'
+    '.github/workflows/frozen-transitive-probe.yml':
+        - 'qb20nh/transition-test@93652f3e19efae7f268e56fc64dc774af069a02e'
 dependencies:
     'actions/attest-build-provenance@36fa7d009e22618ca7cd599486979b8150596c74':
         ref: 'predicate@1.1.4'
@@ -66,3 +68,9 @@ dependencies:
         commit: 'sha1-4a3601121dd01d1626a1e23e37211e3254c1c06c'
         owner_id: 44036562
         repo_id: 192624594
+
+    'qb20nh/transition-test@93652f3e19efae7f268e56fc64dc774af069a02e':
+        ref: '93652f3e19efae7f268e56fc64dc774af069a02e'
+        commit: 'sha1-93652f3e19efae7f268e56fc64dc774af069a02e'
+        owner_id: 1734074
+        repo_id: 579148082
