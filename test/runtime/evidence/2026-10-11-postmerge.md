@@ -1,7 +1,8 @@
 # Post-merge M6 validation
 
 Recorded on 2026-10-11 KST. PR #2 merged into the fork's default branch at
-`2169abe6e476bdf58aa32105efcc2a2792fc92b3`. Upstream publication is separate.
+`2169abe6e476bdf58aa32105efcc2a2792fc92b3`. This delivery is for personal fork
+use; no upstream contribution is planned.
 
 ## Merged-source checks
 
@@ -10,6 +11,13 @@ passed every job: formatting, vet, the full Go race and release suite,
 five materializer tests, 14 protection/hook tests, all 35 stub scenarios,
 and all 103 live scenarios. [Lock policy](https://github.com/qb20nh/gh-actions-lock/actions/runs/38072869694)
 posted success on the exact merged commit from `github-actions[bot]`.
+
+[Evidence/protection PR #4](https://github.com/qb20nh/gh-actions-lock/pull/4)
+subsequently merged at `b258e96524e81453878e071e8a5cef2d4b214aba`.
+Its [main tests](https://github.com/qb20nh/gh-actions-lock/actions/runs/38075214001)
+passed every job, and [main Lock policy](https://github.com/qb20nh/gh-actions-lock/actions/runs/38075213613)
+passed on that exact revision. Ruleset API readback still confirms all four
+required checks, strict freshness, no bypass, and no creation exception.
 
 ## Actual PR-target delivery
 
@@ -86,8 +94,17 @@ The user confirms that **Require actions to be pinned to a full-length commit
 SHA** is checked and the exact eight-entry allowlist was saved. These settings
 are owner-confirmed; Administration API readback is unavailable. The current
 connection cannot inspect or change Actions permission or workflow-event
-administration settings. Read those settings back using an owner session; see
-[activation instructions](../../../docs/actions-protection.md).
+administration settings.
+
+The user then saved [Actions event policy 7089](https://github.com/qb20nh/gh-actions-lock/settings/actions/rules/7089)
+after the setup instructions for an Active policy targeting only
+`.github/workflows/lock-policy.yml`, with allowed events `pull_request_target`,
+`push`, `workflow_dispatch`, and `merge_group`. This policy is owner-confirmed;
+the connector rejected its API endpoint as unsupported, so its stored fields
+have not been independently inspected. The setup leaves the undocumented
+native **Require lockfile** option unchecked until its behavior is validated;
+the independent required verifier already rejects missing and malformed locks.
+See [activation instructions](../../../docs/actions-protection.md).
 
 Live merge queues are not applicable to this personal fork:
 [GitHub requires an eligible organization repository](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue).
@@ -98,10 +115,9 @@ review currently handles only PRs.
 ## Remaining goal blockers
 
 - The four required checks and strict branch freshness are confirmed by
-  ruleset API readback. Full-SHA policy and the exact allowlist are
-  owner-confirmed but
-  cannot yet be read back through the current connection. Applicable
-  workflow-event policy also needs Administration access for inspection.
+  ruleset API readback. Full-SHA policy, the exact allowlist, and workflow-event
+  policy are owner-confirmed but cannot yet be independently read back through
+  the current connection. This is an evidence limitation, not a failed setup.
 - Upstream [#125](https://github.com/github/gh-actions-lock/issues/125) remains
   open. The repository-controlled gate rejects malformed input for its covered
   consumers; the platform's own malformed-YAML rejection remains unproven.
@@ -109,4 +125,3 @@ review currently handles only PRs.
   a lock-specific startup error and no execution sentinel.
 
 These results do not publish a stable release or merge an upstream PR.
-

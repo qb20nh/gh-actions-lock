@@ -57,8 +57,9 @@ permission and read access to contents and statuses. Reading Actions permission
 settings requires Administration read; changing them requires Administration
 write. The separate [Actions policy API](https://docs.github.com/en/rest/actions/policies)
 requires Administration write even to read workflow-event policies. The current
-connected GitHub app cannot inspect or apply these administration settings, so
-their activation remains unverified; see the post-merge evidence above.
+connected GitHub app cannot inspect or apply these administration settings.
+Their activation is owner-confirmed; independent API readback remains
+unavailable. See the post-merge evidence above.
 The workflow's ordinary `GITHUB_TOKEN` cannot administer the repository. Do not
 store an administrator token in the workflow to perform this setup.
 
@@ -97,6 +98,22 @@ evaluates that event and will block it from November 2, 2026 unless an applicabl
 policy explicitly allows it. Check the policy and its insights before enabling
 the required status; see [workflow execution protections](https://github.blog/changelog/2026-09-17-workflow-execution-protections-in-github-actions-generally-available/)
 and [secure use of `pull_request_target`](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target).
+
+For this public personal fork, use **Settings → Actions → Policies** and create
+an Active event policy targeting only `.github/workflows/lock-policy.yml`.
+Enable **Restrict events** and allow `pull_request_target`, `push`,
+`workflow_dispatch`, and `merge_group`, matching that workflow's declared
+triggers. Leave actor restrictions unset. Save, reopen the policy, and check
+its enforcement, target, and events; use Policy insights to inspect any denial.
+[GitHub's instructions](https://docs.github.com/en/actions/how-tos/administer/control-workflow-execution)
+cover all public repositories, including personal forks.
+
+The owner saved [policy 7089](https://github.com/qb20nh/gh-actions-lock/settings/actions/rules/7089)
+after these instructions. This is owner confirmation; the current connection
+cannot read its stored policy fields. The setup leaves the native **Require
+lockfile** checkbox unchecked because the public policy schema does not define
+its behavior. Validate that option separately before enabling it; the required
+independent verifier already rejects missing and malformed locks.
 
 Require `Lock policy`, `go-test`, `integration-stub`, and `dependency-review`
 in the existing ruleset, selecting GitHub Actions as their source (app ID
@@ -141,6 +158,27 @@ the exact allowlist and recursive audit remain necessary. These are documented
 platform limits, not proof that our settings have already been enabled.
 
 ## Protect the validator definition
+
+Full-SHA pins depend on GitHub's Git object integrity. An ordinary force-push
+moves a ref; it does not replace the content identified by an existing pin.
+Replacing an already trusted object under its fixed ID requires a second
+preimage, which differs from preparing a colliding pair before either object is
+trusted. [GitHub uses collision-detecting SHA-1](https://github.blog/open-source/git/highlights-from-git-2-48/)
+against known attacks. This mitigation does not restore SHA-1's general
+collision resistance.
+
+The policy downloads its pinned verifier source from GitHub without an
+independent SHA-256 content digest. Remote action manifests and parity checks
+also trust GitHub's object responses. The release smoke verifies a binary's
+SHA-256 and provenance; it does not provide SHA-256 verification of every source
+file used by the gate or executed actions. Additional content verification would
+need a reviewed digest baseline and checks of the bytes actually executed.
+
+[Git's 3.0 plan](https://git-scm.com/docs/BreakingChanges) changes the default
+object format to SHA-256 for new repositories, retains SHA-1 support, and has no
+scheduled release date. Upgrading Git alone does not convert this repository or
+its Actions references; support must extend through the hosting and Actions
+platforms.
 
 [CODEOWNERS](../.github/CODEOWNERS) assigns workflow, verifier, policy, hook, and
 dependency changes to `@qb20nh`. GitHub reads that ownership from a PR's base
