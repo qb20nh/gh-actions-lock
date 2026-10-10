@@ -8,7 +8,6 @@ import (
 
 	"github.com/github/gh-actions-lock/internal/dep"
 	"github.com/github/gh-actions-lock/internal/lockfile"
-	"github.com/github/gh-actions-lock/internal/workflowfile"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -24,8 +23,9 @@ func (fakeMeta) RepoIDs(_ context.Context, _, _, _ string) (int64, int64, error)
 func TestRetainUnresolvablePins_keepsExistingPinOnColocatedRepin(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".github", "workflows"), 0o755))
-	wfPath := filepath.Join(dir, ".github", "workflows", "ci.yml")
-	wfKey := workflowfile.KeyFromPath(wfPath)
+	wfPath := ".github/workflows/ci.yml"
+	wfKey := ".github/workflows/ci.yml"
+	t.Chdir(dir)
 
 	store, err := lockfile.LoadState(dir, fakeMeta{})
 	require.NoError(t, err)
@@ -74,7 +74,7 @@ func TestRetainUnresolvablePins_keepsExistingPinOnColocatedRepin(t *testing.T) {
 func TestRetainUnresolvablePins_noopWithoutImpostorFinding(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".github", "workflows"), 0o755))
-	wfPath := filepath.Join(dir, ".github", "workflows", "ci.yml")
+	wfPath := ".github/workflows/ci.yml"
 
 	store, err := lockfile.LoadState(dir, fakeMeta{})
 	require.NoError(t, err)
@@ -94,8 +94,9 @@ func TestRetainUnresolvablePins_noopWithoutImpostorFinding(t *testing.T) {
 func TestRetainUnresolvablePins_keepsUnresolvedPin(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".github", "workflows"), 0o755))
-	wfPath := filepath.Join(dir, ".github", "workflows", "ci.yml")
-	wfKey := workflowfile.KeyFromPath(wfPath)
+	wfPath := ".github/workflows/ci.yml"
+	wfKey := ".github/workflows/ci.yml"
+	t.Chdir(dir)
 
 	store, err := lockfile.LoadState(dir, fakeMeta{})
 	require.NoError(t, err)

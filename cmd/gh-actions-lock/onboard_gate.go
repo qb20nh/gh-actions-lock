@@ -4,7 +4,9 @@ import (
 	"fmt"
 
 	parserlock "github.com/github/actions-lockfile/go/pkg/lockfile"
+	"github.com/github/gh-actions-lock/internal/lockfile"
 	"github.com/github/gh-actions-lock/internal/pipeline/checks"
+	"github.com/github/gh-actions-lock/internal/workflowfile"
 	"github.com/spf13/cobra"
 )
 
@@ -18,7 +20,7 @@ func noOnboardFlag(cmd *cobra.Command) bool {
 // gateNoOnboard rewrites per-workflow NotPinned findings to OnboardingRequired
 // and drops their refs so Plan never pins them. Returns the refused entry labels
 // (e.g. "actions/checkout@v4 in .github/workflows/ci.yml").
-func gateNoOnboard(report *checks.Report) []string {
+func gateNoOnboard(report *checks.Report, store *lockfile.State) []string {
 	var refused []string
 	for wi := range report.Workflows {
 		wr := &report.Workflows[wi]
@@ -32,6 +34,10 @@ func gateNoOnboard(report *checks.Report) []string {
 			refusedKeys[parserlock.IndexKey(ar.Owner, ar.Repo, ar.Ref)] = true
 			f.Category = checks.OnboardingRequired
 			f.Severity = checks.SeverityInfo
+			if store != nil && store.HasWorkflow(workflowfile.KeyFromPath(wr.Path)) {
+				f.Severity = checks.SeverityError
+				wr.SkipCommit = true
+			}
 			f.Detail = fmt.Sprintf("%s@%s has no lockfile entry; --no-onboard refuses to add new workflows or actions", ar.FullName(), ar.Ref)
 			f.Remediation = "onboard it first with `gh actions-lock` (without --no-onboard)"
 			refused = append(refused, fmt.Sprintf("%s@%s in %s", ar.FullName(), ar.Ref, wr.Path))
@@ -47,6 +53,15 @@ func gateNoOnboard(report *checks.Report) []string {
 			kept = append(kept, ar)
 		}
 		wr.ActionRefs = kept
+		if wr.RewriteRefs != nil {
+			keptRewrites := make([]parserlock.ActionRef, 0, len(wr.RewriteRefs))
+			for _, ar := range wr.RewriteRefs {
+				if !refusedKeys[parserlock.IndexKey(ar.Owner, ar.Repo, ar.Ref)] {
+					keptRewrites = append(keptRewrites, ar)
+				}
+			}
+			wr.RewriteRefs = keptRewrites
+		}
 	}
 	return refused
 }

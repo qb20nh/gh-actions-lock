@@ -1,0 +1,58 @@
+name: M6 runtime smoke
+on:
+  push:
+    branches:
+      - codex/m6-implementation-*
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  same-repository:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Record workflow revision
+        run: echo "M6_CALLER_COMMIT=$GITHUB_SHA"
+      - id: self
+        uses: $/test/runtime/actions/wrapper
+        with:
+          expected-marker: gh-actions-lock-runtime-leaf-v1
+  cross-repository:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+        with:
+          persist-credentials: false
+      - name: Poison the caller workspace definition
+        run: |
+          mkdir -p test/runtime/actions/leaf
+          cat > test/runtime/actions/leaf/action.yml <<'YAML'
+          name: Poisoned caller leaf
+          runs:
+            using: composite
+            steps:
+              - shell: bash
+                run: echo M6_CALLER_WORKSPACE_USED; exit 1
+          YAML
+      - uses: qb20nh/transition-test/test/runtime/actions/wrapper@38a3e6df964dfe1756abb8dec154228d7140a841
+        with:
+          expected-marker: gh-actions-lock-runtime-leaf-v1
+  locked-symbolic-ref:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Record expected locked revision
+        run: echo "M6_EXPECTED_PROVIDER_COMMIT=38a3e6df964dfe1756abb8dec154228d7140a841"
+      - uses: qb20nh/transition-test/test/runtime/actions/wrapper@codex/m6-gh-actions-lock-fixtures-20261010
+        with:
+          expected-marker: gh-actions-lock-runtime-leaf-v1
+  foreign-reusable-workflow:
+    uses: qb20nh/transition-test/.github/workflows/m6-provider.yml@38a3e6df964dfe1756abb8dec154228d7140a841
+    with:
+      caller-repository: qb20nh/gh-actions-lock
+      caller-ref: ${{ github.sha }}
+  confirm-reusable-output:
+    needs: foreign-reusable-workflow
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          M6_PROVIDER_MARKER: ${{ needs.foreign-reusable-workflow.outputs.marker }}
+        run: test "$M6_PROVIDER_MARKER" = gh-actions-lock-runtime-leaf-v1

@@ -9,7 +9,7 @@ Lock your workflow dependencies.
 
 ## Background
 
-gh-actions-lock is part of GitHub's Workflow Dependency Pinning effort. It gives repositories a lockfile that pins every workflow dependency to a verified commit, so what runs on the runner is exactly what you locked. Development is ongoing and behavior may still change.
+gh-actions-lock is part of GitHub's Workflow Dependency Pinning effort. It records verified commits for workflow dependencies in a lockfile for compatible runners and Actions services to enforce. Development is ongoing and behavior may still change.
 
 Contributions are welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) to get started.
 
@@ -25,21 +25,83 @@ gh extension install github/gh-actions-lock
 
 ## Usage
 
-Scan every workflow under `.github/workflows/` directory, pin each resolvable action to a SHA, and update the lockfile:
+Scan workflows under `.github/workflows/`, resolve their action and reusable workflow dependencies, and update the lockfile:
 
 ```bash
 gh actions-lock
 ```
 
 After the initial run to onboard workflows, you will need to run `gh actions-lock` when:
+
 - A new workflow is created that has `uses` dependencies.
 - An existing workflow adds or removes `uses` dependencies.
 
 A full-directory run (`gh actions-lock` with no path arguments) also prunes lockfile entries for workflows that have been deleted from `.github/workflows/`, dropping any dependencies left orphaned by the removal. Scoped runs that name specific workflows never prune out-of-scope entries.
 
-Pins to branches or partial versions (e.g. `main`, `v4`) are trusted from the
-lockfile and not re-resolved on a normal run. To bump them to the current
-upstream commit, run:
+When no workflows remain, confirming corrupt-lock recovery during a full scan
+removes the obsolete lockfile through the normal guarded commit path.
+
+Locked pins are sticky: a normal run only re-resolves refs the lockfile does
+not record yet. It checks repository identity, that pinned object IDs identify
+commits, and whether full-version tags (e.g. `v4.2.1`) still point at the recorded
+commit. These checks include transitive pins and full-SHA uses covered by
+symbolic lock keys. A verified
+direct rename or transfer can update the repository name while preserving its
+commit. Read-only verification rejects old names because
+[GitHub Actions does not support redirects](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/find-and-customize-actions);
+references inside remote dependencies require updating their
+parent. Failed identity or commit checks block updates.
+
+Rejected validation, resolution, and cooldown checks leave workflow, action,
+and lockfile contents unchanged, including otherwise valid workflows in the
+same run. Proposed YAML rewrites and lock coverage are validated before
+committing the update. Unsupported edits to anchored or multiline `uses:`
+values require manual changes.
+
+If a final filesystem write fails, the CLI attempts to restore files it changed
+and reports restoration failures. This is best-effort recovery; an update
+spanning multiple files is not atomic across a process crash or power loss.
+
+Overlapping updates to the same lockfile are rejected. If the CLI detects that
+the lockfile or a source file changed since it was read, retry after the other
+update has finished.
+
+To check without changing workflows, action files, or the lockfile, run:
+
+```bash
+gh actions-lock --verify
+```
+
+`--verify`, `--verify-local`, and `--no-fix` remain read-only even when combined
+with `--migrate-local-actions`. `--verify-local` checks source and recorded
+dependency coverage offline; it does not check current upstream metadata.
+
+To require a lockfile during offline validation, run:
+
+```bash
+gh actions-lock --verify-local --require-lockfile
+```
+
+`--require-lockfile` rejects missing, empty, and symlinked lockfiles, including
+symlinked path components within the repository, even for shell-only workflows.
+
+For execution independent of runtime lockfile enforcement, use full commit SHAs
+for every remote `uses:` reference, including transitive children, then run:
+
+```bash
+gh actions-lock --verify-frozen
+```
+
+This authenticated, read-only check requires a lockfile and inspects action and
+reusable workflow manifests at their defining commits. Missing dependencies,
+mutable references, invalid manifests, and inconclusive checks fail validation.
+It follows repository-relative and `$/…` dependencies and requires full SHA-256
+digests for `docker://` action uses. It cannot be combined with `--verify-local`
+or modes that update or migrate dependencies.
+
+Pins to branches or partial versions (e.g. `main`, `v4`) are not advanced when
+upstream moves. To regenerate the lockfile from the current upstream commits,
+run:
 
 ```bash
 gh actions-lock --relock
@@ -49,6 +111,44 @@ gh actions-lock --relock
 lockfile to the new SHA. Suspicious pins whose recorded commit is no longer
 reachable upstream are left as errors — use `--accept-moved` to re-resolve
 those as well.
+
+For structured output, use `--json=valid,findings,pins`. Pin entries distinguish
+proposed changes (`outcome: "planned"`, `applied: false`) from persisted changes
+(`applied: true`). A rejected run does not report proposed pins as applied.
+
+`--no-onboard` skips new workflows. Adding an unrecorded dependency to an
+already tracked workflow produces an onboarding error and prevents writes;
+run without the flag to add that dependency.
+
+### Release cooldown
+
+A positive `cooldown.default-days` in a Dependabot `github-actions` entry sets
+the minimum release publication age. Otherwise, the CLI reads
+`~/.config/gh-actions-lock/config.yml` (or `GH_ACTIONS_LOCK_CONFIG`):
+
+```yaml
+cooldown_days: 7
+repos:
+  actions/checkout:
+    cooldown_days: 0
+```
+
+Per-repository values override the user configuration's default; zero disables
+cooldown for that repository. Unsupported Dependabot cooldown settings produce
+warnings.
+
+Cooldown applies to newly adopted direct and transitive commits during initial
+locking, `--relock`, and `--accept-moved`. Commits already recorded in the
+lockfile remain usable. `--no-narrow` does not bypass cooldown, and cooldown
+does not substitute an older commit for the requested one.
+
+Eligibility uses `published_at` from an exact GitHub Release whose tag currently
+resolves to the proposed SHA. Missing publication metadata, API failures, or a
+branch or bare SHA without a discovered release tag block adoption. A tag known
+to have moved from a recorded commit also blocks adoption because its old
+publication date cannot establish the new commit's age. Current release
+metadata proves publication age and today's tag target; it cannot prove that
+the same tag-to-commit binding existed throughout the cooldown period.
 
 ### GitHub Enterprise Cloud with data residency
 
@@ -68,44 +168,92 @@ have read access to the tenant repositories used by your workflows.
 
 ### Self repository actions (`$/…`)
 
-`uses: $/…` references an action or reusable workflow in the **same repository** as
-the defining file, resolved at the **running commit**. Because it always resolves to
-that repository's running SHA it is **inherently pinned** — no lockfile entry is
-required, and it is valid anywhere a relative `./…` reference is:
+`uses: $/…` binds an action or reusable workflow to the **defining file's
+repository and commit**. The CLI treats that source as inherently pinned, so it
+does not need a separate lockfile entry; its remote dependencies still do:
 
 ```yaml
-steps:
-  - uses: $/actions/my-action          # same-repo action, inherently pinned
 jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: $/actions/my-action
   call:
-    uses: $/.github/workflows/reusable.yml  # same-repo reusable workflow
+    uses: $/.github/workflows/reusable.yml
 ```
 
-A trailing `@ref` (e.g. `$/actions/my-action@v1`) is rejected — the ref is always
-the running commit.
+A trailing `@ref` (e.g. `$/actions/my-action@v1`) is rejected because the defining
+file supplies the commit.
 
-Same-repo `./…` composite action references are automatically converted to `$/…`
-on fix runs. This rewrites `./…` steps both in your workflows and in your in-repo
-composite action definitions (`action.yml`). Only `./…` paths that resolve to an
-in-repo action file are rewritten. To leave `./…` refs untouched, opt out with
-`--no-migrate-local-actions`:
+A step's `uses: ./…` reads from the caller's workspace. Checkout `repository`,
+`ref`, and `path` settings, generated files, or earlier file modifications can
+make it refer to different contents from `$/…`. In a remotely called reusable
+workflow, the defining repository can also differ from the caller's checkout.
+An action file existing in your repository does not establish equivalence.
+
+Migration is opt-in. After checking these semantics, explicitly rewrite eligible
+local action references in selected workflows and their reached in-repo
+definitions:
 
 ```bash
-gh actions-lock --no-migrate-local-actions
+gh actions-lock --migrate-local-actions
 ```
+
+Without this flag, `./…` action references remain unchanged.
+`--no-migrate-local-actions` is also accepted. Local reusable workflow calls are
+discovered without converting them to `$/…`.
+
+[Recorded GitHub smoke tests](./test/runtime/evidence/2026-10-10.md) passed
+same-repository and cross-repository `$/…` calls, including nested reusable
+workflows, on the tested hosted runner/service deployment. Support depends on
+the deployed service and runner configuration. The same tests found that a
+syntactically malformed lock could be ignored at runtime; strict rejection
+remains tracked in [#125](https://github.com/github/gh-actions-lock/issues/125).
+
+A [tested workaround](./test/runtime/evidence/2026-10-10-workarounds.md) puts
+trusted offline verification in a separate job with no actions, container, or
+services, and makes consumers depend on its success. A malformed lock then
+blocks those consumers. Validation inside a consumer's first step starts after
+action preparation. Full-SHA references provide additional protection, but a
+pinned parent can still declare mutable remote children.
+
+The repository's CI and release workflows now use separate action-free gates
+with `--verify-frozen` before consumers run. A trusted policy workflow validates
+exact PR head and merge revisions and posts the `Lock policy` status. Remote
+references use full SHAs, including the vendored release composite's children.
+The staged pre-commit hook, ownership rules, exact external allowlist, and
+repository setup script are described in [Actions lock protections](./docs/actions-protection.md).
+Repository administration settings have not yet been applied; upstream #125
+remains open.
 
 ## How it works
 
-A repo gets a lockfile (located at [`.github/workflows/actions.lock`](https://github.com/github/gh-actions-lock/blob/main/.github/workflows/actions.lock)) and workflows are onboarded to the lockfile on a per-workflow basis. 
+A repo gets a lockfile at [`.github/workflows/actions.lock`](https://github.com/github/gh-actions-lock/blob/main/.github/workflows/actions.lock), and workflows are onboarded individually.
 
-Workflows that are onboarded to the lockfile enforce that all dependencies are present in the lockfile and guarantees that the locked commit for an Action is what's executed on the runner. Lockfiles are also verified for forgeries. The sha must exist in the refs it's stated to exist in. Repository identity is recorded and redirects and mismatches are blocked at runtime. 
+Remote reusable workflows and action manifests are inspected at their exact
+resolved or recorded commit. Discovery follows composite action dependencies,
+nested reusable workflows, repository-relative reusable workflow calls, and
+`$/…` references in the defining repository. Selected local workflows and their
+repository-relative dependency closure are inspected from the checkout.
 
-Finally, locked actions must have a branch that the commit being locked exists within. This is to make impostor commit style attacks harder.
+The lockfile records repository identity, commits, and dependency relationships.
+Verification checks required pins and recorded child references, including
+full-SHA uses. Missing or invalid manifests, unresolved children, and invalid
+reusable workflow cycles prevent complete coverage from being reported.
+Reachability checks help detect commits supplied from outside the declared
+upstream history.
 
 ## Limitations
 
-There are currently eligibility limitations for workflows that can be onboarded to lockfiles:
-- Workflows in the lockfile cannot use local-path actions, these will be skipped for onboarding. This is also a short-term gap.
+Workspace-relative `./…` action steps cannot establish complete lockfile
+coverage. Workflows using them report incomplete coverage and are not newly
+onboarded. Existing recorded pins are preserved, and other remote dependencies
+are still checked. Generated or caller-modified actions need a dependency model
+beyond static repository metadata.
+
+Frozen verification covers GitHub action and reusable workflow dependencies
+and `docker://` action uses. Arbitrary Dockerfile dependencies, job containers,
+services, shell downloads, and installed tools are outside this dependency graph.
 
 ## License
 

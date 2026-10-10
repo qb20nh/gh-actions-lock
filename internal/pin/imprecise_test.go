@@ -18,7 +18,7 @@ import (
 func TestPlan_impreciseTransitivePinDoesNotBlockDirectNarrowing(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".github", "workflows"), 0o755))
-	wfPath := filepath.Join(dir, ".github", "workflows", "ci.yml")
+	wfPath := filepath.Join(".github", "workflows", "ci.yml")
 	wfKey := workflowfile.KeyFromPath(wfPath)
 
 	store, err := lockfile.LoadState(dir, fakeMeta{})

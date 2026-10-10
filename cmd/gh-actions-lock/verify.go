@@ -2,8 +2,8 @@ package main
 
 // Verification modes for gh actions-lock:
 //
-//   --verify       Full re-verification of every pin against the network.
-//                  Equivalent to --rescan --no-fix. Requires auth.
+//   --verify       Frozen check: the default checks, including runner parity
+//                  for every locked pin, without writing. Requires auth.
 //
 //   --verify-local Offline static coverage check. Every action ref must have
 //                  a lockfile entry. No network, no auth — ideal for pre-commit.
@@ -23,9 +23,11 @@ import (
 // applyVerifyFlags expands --verify into its constituent flags. Called at the
 // top of runCheck before any work begins.
 func applyVerifyFlags(opts *checkOptions) {
-	if opts.verify {
-		opts.rescan = true
+	if opts.verify || opts.verifyFrozen {
 		opts.noFix = true
+	}
+	if opts.verifyFrozen {
+		opts.requireLockfile = true
 	}
 }
 
@@ -37,19 +39,6 @@ func runVerifyLocal(opts *checkOptions, out io.Writer, console *ui.UI) error {
 	paths, err := discoverWorkflowPaths(opts.workflowPaths, workflowsDir, false)
 	if err != nil {
 		return err
-	}
-
-	// Rewrite same-repo `./…` refs to `$/…` on disk before the coverage check
-	// sees them. Runs by default on fix runs even in this otherwise read-only
-	// mode; opt out with --no-migrate-local-actions, and never under --no-fix.
-	if !opts.noMigrateLocalActions && !opts.noFix {
-		migrated, mErr := migrateLocalActions(paths)
-		if mErr != nil {
-			return mErr
-		}
-		if migrated > 0 && opts.jsonFields == "" {
-			console.TermSuccess("Migrated %d local %s to `$/…`", migrated, ui.Pluralize(migrated, "action", "actions"))
-		}
 	}
 
 	// Load the lockfile without a resolver (no network).
@@ -72,7 +61,7 @@ func runVerifyLocal(opts *checkOptions, out io.Writer, console *ui.UI) error {
 	valid := report.IsValid()
 
 	if opts.jsonFields != "" {
-		if err := format.WriteJSON(out, report, valid, opts.jsonFields, cliVersion(), store.File().Version, hostname); err != nil {
+		if err := format.WriteJSON(out, report, nil, valid, opts.jsonFields, cliVersion(), store.File().Version, hostname); err != nil {
 			return err
 		}
 	} else {

@@ -49,38 +49,18 @@ jobs:
 }
 
 func TestApplyVerifyFlags(t *testing.T) {
-	tests := []struct {
-		name       string
-		opts       checkOptions
-		wantRescan bool
-		wantNoFix  bool
-	}{
-		{
-			name:       "verify sets rescan and noFix",
-			opts:       checkOptions{verify: true},
-			wantRescan: true,
-			wantNoFix:  true,
-		},
-		{
-			name:       "no verify leaves flags alone",
-			opts:       checkOptions{},
-			wantRescan: false,
-			wantNoFix:  false,
-		},
-		{
-			name:       "verify with existing rescan keeps both",
-			opts:       checkOptions{verify: true, rescan: true},
-			wantRescan: true,
-			wantNoFix:  true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			applyVerifyFlags(&tt.opts)
-			assert.Equal(t, tt.wantRescan, tt.opts.rescan)
-			assert.Equal(t, tt.wantNoFix, tt.opts.noFix)
-		})
-	}
+	opts := checkOptions{verify: true}
+	applyVerifyFlags(&opts)
+	assert.True(t, opts.noFix, "verify implies no-fix")
+
+	opts = checkOptions{}
+	applyVerifyFlags(&opts)
+	assert.False(t, opts.noFix)
+
+	opts = checkOptions{verifyFrozen: true}
+	applyVerifyFlags(&opts)
+	assert.True(t, opts.noFix)
+	assert.True(t, opts.requireLockfile)
 }
 
 func TestValidateOutputFlags_VerifyConflicts(t *testing.T) {
@@ -95,11 +75,6 @@ func TestValidateOutputFlags_VerifyConflicts(t *testing.T) {
 			wantErr: "mutually exclusive",
 		},
 		{
-			name:    "verify-local and rescan conflict",
-			opts:    checkOptions{verifyLocal: true, rescan: true},
-			wantErr: "offline",
-		},
-		{
 			name:    "verify-local and accept-moved conflict",
 			opts:    checkOptions{verifyLocal: true, acceptMoved: true},
 			wantErr: "offline",
@@ -108,6 +83,16 @@ func TestValidateOutputFlags_VerifyConflicts(t *testing.T) {
 			name:    "verify-local and relock conflict",
 			opts:    checkOptions{verifyLocal: true, relock: true},
 			wantErr: "offline",
+		},
+		{
+			name:    "frozen and verify-local are mutually exclusive",
+			opts:    checkOptions{verifyFrozen: true, verifyLocal: true},
+			wantErr: "mutually exclusive",
+		},
+		{
+			name:    "frozen refuses ref changes",
+			opts:    checkOptions{verifyFrozen: true, relock: true},
+			wantErr: "--verify-frozen",
 		},
 		{
 			name: "verify alone is valid",

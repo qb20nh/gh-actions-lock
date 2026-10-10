@@ -85,6 +85,7 @@ func TestParseActionFileResponse_FileErrors(t *testing.T) {
 		file    string
 		errors  []api.GraphQLErrorItem
 		wantErr bool
+		missing bool
 	}{
 		{
 			name: "yml exists and yaml is absent", file: "file",
@@ -95,7 +96,7 @@ func TestParseActionFileResponse_FileErrors(t *testing.T) {
 			errors: []api.GraphQLErrorItem{{Type: "NOT_FOUND", Path: []any{"a0", "object", "file"}}},
 		},
 		{
-			name: "reusable workflow has neither metadata file",
+			name: "missing metadata is fatal", wantErr: true, missing: true,
 			errors: []api.GraphQLErrorItem{
 				{Type: "NOT_FOUND", Path: []any{"a0", "object", "file"}},
 				{Type: "NOT_FOUND", Path: []any{"a0", "object", "fileYaml"}},
@@ -144,7 +145,11 @@ func TestParseActionFileResponse_FileErrors(t *testing.T) {
 				&api.GraphQLError{Errors: tt.errors}, "github.com")
 			require.Len(t, results, 1)
 			if tt.wantErr {
-				require.ErrorContains(t, results[0].Err, "file lookup failed")
+				if tt.missing {
+					require.ErrorContains(t, results[0].Err, "metadata action.yml not found")
+				} else {
+					require.ErrorContains(t, results[0].Err, "file lookup failed")
+				}
 				return
 			}
 			require.NoError(t, results[0].Err)

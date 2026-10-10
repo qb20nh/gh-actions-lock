@@ -1,0 +1,348 @@
+#!/usr/bin/env python3
+"""Test preservation and failure boundaries for repository administration."""
+
+import base64
+from contextlib import redirect_stdout
+import copy
+import importlib.machinery
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+
+sys.dont_write_bytecode = True
+loader = importlib.machinery.SourceFileLoader("actions_protection", str(Path(__file__).with_name("apply-actions-protection")))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+protection = importlib.util.module_from_spec(spec)
+loader.exec_module(protection)
+POLICY = {"version": 1, "required_check": {"context": "Lock policy", "app_id": 15368},
+          "patterns_allowed": ["actions/checkout@" + "a" * 40]}
+PERMISSIONS = {"enabled": True, "allowed_actions": "selected", "sha_pinning_required": True}
+SELECTED = {"github_owned_allowed": False, "verified_allowed": False,
+            "patterns_allowed": POLICY["patterns_allowed"]}
+
+
+class ProtectionTests(unittest.TestCase):
+    def test_existing_reviews_restrictions_and_signatures_are_not_replaced(self):
+        current = {"required_status_checks": {"strict": False, "contexts": ["Existing check"],
+                                             "checks": [{"context": "Existing check", "app_id": 42}]},
+                   "required_pull_request_reviews": {"required_approving_review_count": 2,
+                                                     "require_code_owner_reviews": True},
+                   "restrictions": {"users": [{"login": "reviewer"}]},
+                   "required_signatures": {"enabled": True},
+                   "enforce_admins": {"enabled": False}}
+        previous = copy.deepcopy(current)
+        plan = protection.build_plan("owner/repo", "release/main", PERMISSIONS, SELECTED, current, POLICY)
+        self.assertEqual(current, previous)
+        self.assertEqual([item[0] for item in plan], ["PATCH", "POST"])
+        self.assertEqual(plan[0][1], "repos/owner/repo/branches/release%2Fmain/protection/required_status_checks")
+        self.assertEqual(plan[0][2]["checks"], [{"context": "Existing check", "app_id": 42}, POLICY["required_check"]])
+        self.assertTrue(plan[0][2]["strict"])
+
+    def test_matching_state_has_no_mutations(self):
+        current = {"required_status_checks": protection.required_checks(None, POLICY["required_check"]),
+                   "enforce_admins": {"enabled": True}}
+        self.assertEqual(protection.build_plan("owner/repo", "main", PERMISSIONS, SELECTED, current, POLICY), [])
+
+    def test_new_protection_keeps_personal_owner_pr_mergeable(self):
+        plan = protection.build_plan("owner/repo", "main", PERMISSIONS, SELECTED, None, POLICY)
+        reviews = plan[0][2]["required_pull_request_reviews"]
+        self.assertEqual(reviews["required_approving_review_count"], 0)
+        self.assertFalse(reviews["require_code_owner_reviews"])
+        self.assertTrue(plan[0][2]["enforce_admins"])
+
+    def test_existing_stricter_actions_policies_are_not_weakened(self):
+        for changes in ({"enabled": False}, {"allowed_actions": "local_only"}):
+            with self.subTest(changes=changes):
+                with self.assertRaises(protection.PolicyError):
+                    protection.build_plan("owner/repo", "main", PERMISSIONS | changes, SELECTED, None, POLICY)
+
+    def test_wildcards_tags_and_parent_paths_are_rejected(self):
+        for ref in ("actions/*@" + "a" * 40, "actions/checkout@v6", "actions/checkout/../action@" + "a" * 40):
+            with self.subTest(ref=ref), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "policy.json"
+                path.write_text(json.dumps(POLICY | {"patterns_allowed": [ref]}))
+                with self.assertRaises(protection.PolicyError):
+                    protection.load_policy(path)
+
+    def test_latest_failed_status_does_not_accept_older_success(self):
+        sha = "b" * 40
+
+        class API:
+            def api(self, endpoint):
+                if "/contents/" in endpoint:
+                    return {"type": "file", "content": base64.b64encode(json.dumps(POLICY).encode()).decode()}
+                return [
+                    {"context": "Lock policy", "state": "failure", "creator": {"login": "github-actions[bot]"}},
+                    {"context": "Lock policy", "state": "success", "creator": {"login": "github-actions[bot]"}},
+                ]
+
+        with self.assertRaisesRegex(protection.PolicyError, "latest"):
+            protection.deployed_policy(API(), "owner/repo", {"commit": {"sha": sha}}, POLICY)
+
+    def test_non_actions_status_source_is_not_accepted(self):
+        sha = "b" * 40
+
+        class API:
+            def api(self, endpoint):
+                if "/contents/" in endpoint:
+                    return {"type": "file", "content": base64.b64encode(json.dumps(POLICY).encode()).decode()}
+                return [
+                    {"context": "Lock policy", "state": "success", "creator": {"login": "owner"}},
+                ]
+
+        with self.assertRaises(protection.PolicyError):
+            protection.deployed_policy(API(), "owner/repo", {"commit": {"sha": sha}}, POLICY)
+
+    def test_status_list_accepts_latest_actions_success_across_pages(self):
+        sha = "b" * 40
+        success = {"id": 101, "context": "Lock policy", "state": "success",
+                   "creator": {"login": "github-actions[bot]"}}
+        older_pending = {"id": 100, "context": "Lock policy", "state": "pending",
+                         "creator": {"login": "github-actions[bot]"}}
+
+        class API:
+            def __init__(self, paginated):
+                self.paginated = paginated
+                self.status_requests = []
+
+            def api(self, endpoint):
+                if "/contents/" in endpoint:
+                    return {"type": "file", "content": base64.b64encode(json.dumps(POLICY).encode()).decode()}
+                self.status_requests.append(endpoint)
+                first = f"repos/owner/repo/commits/{sha}/statuses?per_page=100&page=1"
+                second = f"repos/owner/repo/commits/{sha}/statuses?per_page=100&page=2"
+                if endpoint == first:
+                    if self.paginated:
+                        return [{"id": index, "context": f"Other check {index}", "state": "failure",
+                                 "creator": {"login": "owner"}} for index in range(100)]
+                    return [success, older_pending]
+                if endpoint == second and self.paginated:
+                    return [success, older_pending]
+                raise AssertionError(endpoint)
+
+        for paginated in (False, True):
+            with self.subTest(paginated=paginated):
+                api = API(paginated)
+                self.assertEqual(protection.deployed_policy(api, "owner/repo", {"commit": {"sha": sha}}, POLICY), sha)
+                self.assertEqual(len(api.status_requests), 2 if paginated else 1)
+
+    def test_unknown_status_creator_is_not_accepted(self):
+        sha = "b" * 40
+
+        class API:
+            def __init__(self, creator):
+                self.creator = creator
+
+            def api(self, endpoint):
+                if "/contents/" in endpoint:
+                    return {"type": "file", "content": base64.b64encode(json.dumps(POLICY).encode()).decode()}
+                status = {"context": "Lock policy", "state": "success"}
+                if self.creator != "missing":
+                    status["creator"] = self.creator
+                return [status]
+
+        for creator in ("missing", None, {}):
+            with self.subTest(creator=creator), self.assertRaises(protection.PolicyError):
+                protection.deployed_policy(API(creator), "owner/repo", {"commit": {"sha": sha}}, POLICY)
+
+    def test_unvalidated_default_branch_has_no_writes(self):
+        sha = "b" * 40
+
+        class API:
+            writes = []
+
+            def api(self, endpoint, method="GET", body=None):
+                if method != "GET":
+                    self.writes.append((method, endpoint, body))
+                    return None
+                if endpoint == "repos/owner/repo":
+                    return {"permissions": {"admin": True}, "private": False, "default_branch": "main"}
+                if endpoint.endswith("/branches/main"):
+                    return {"protected": False, "commit": {"sha": sha}}
+                if endpoint.endswith("/actions/permissions"):
+                    return {"enabled": True, "allowed_actions": "all"}
+                if "/contents/" in endpoint:
+                    return {"type": "file", "content": base64.b64encode(json.dumps(POLICY).encode()).decode()}
+                if "/statuses?" in endpoint:
+                    return []
+                raise AssertionError(endpoint)
+
+        api = API()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".github").mkdir()
+            (root / protection.POLICY_PATH).write_text(json.dumps(POLICY))
+            with patch.object(protection, "ROOT", root), redirect_stdout(io.StringIO()):
+                with self.assertRaises(protection.PolicyError):
+                    protection.main(["--repo", "owner/repo", "--apply"], github=api)
+        self.assertEqual(api.writes, [])
+
+    def test_credential_error_details_are_not_printed(self):
+        class Result:
+            returncode = 1
+            stderr = "token=should-never-be-printed"
+            stdout = ""
+
+        with patch.object(protection.subprocess, "run", return_value=Result()):
+            with self.assertRaises(protection.PolicyError) as error:
+                protection.GitHub().api("repos/owner/repo")
+        self.assertNotIn("should-never-be-printed", str(error.exception))
+
+    def test_other_branch_requires_a_deployed_stable_default_before_writes(self):
+        tested_sha = "b" * 40
+        default_sha = "c" * 40
+
+        class API:
+            def __init__(self, deployed, changed):
+                self.deployed = deployed
+                self.changed = changed
+                self.default_reads = 0
+                self.writes = []
+
+            def api(self, endpoint, method="GET", body=None):
+                if method != "GET":
+                    self.writes.append((method, endpoint, body))
+                    return None
+                if endpoint == "repos/owner/repo":
+                    return {"permissions": {"admin": True}, "private": False, "default_branch": "main"}
+                if endpoint.endswith("/branches/release"):
+                    return {"protected": False, "commit": {"sha": tested_sha}}
+                if endpoint.endswith("/branches/main"):
+                    self.default_reads += 1
+                    sha = "d" * 40 if self.changed and self.default_reads > 1 else default_sha
+                    return {"protected": False, "commit": {"sha": sha}}
+                if endpoint.endswith("/actions/permissions"):
+                    return {"enabled": True, "allowed_actions": "all"}
+                if "/contents/" in endpoint:
+                    if endpoint.endswith("ref=" + default_sha) and not self.deployed:
+                        raise protection.PolicyError("default branch policy is not deployed")
+                    return {"type": "file", "content": base64.b64encode(json.dumps(POLICY).encode()).decode()}
+                if "/statuses?" in endpoint:
+                    return [{"context": "Lock policy", "state": "success",
+                             "creator": {"login": "github-actions[bot]"}}]
+                raise AssertionError(endpoint)
+
+        for name, deployed, changed in [("undeployed default", False, False), ("changed default", True, True)]:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / ".github").mkdir()
+                (root / protection.POLICY_PATH).write_text(json.dumps(POLICY))
+                api = API(deployed, changed)
+                with patch.object(protection, "ROOT", root), redirect_stdout(io.StringIO()):
+                    with self.assertRaisesRegex(protection.PolicyError, "default branch"):
+                        protection.main(["--repo", "owner/repo", "--branch", "release", "--apply"], github=api)
+                self.assertEqual(api.writes, [])
+
+
+@unittest.skipUnless(shutil.which("git") and shutil.which("go"), "hook checks need git and Go")
+class HookSnapshotTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.binary_directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.binary_directory.cleanup)
+        cls.binary = Path(cls.binary_directory.name) / "gh-actions-lock"
+        cls.repository = Path(__file__).resolve().parent.parent
+        subprocess.run(["go", "build", "-mod=readonly", "-p=4", "-o", str(cls.binary), "./cmd/gh-actions-lock"],
+                       cwd=cls.repository, check=True)
+
+    def check_snapshot(self, staged="valid", workspace=None, hidden=None):
+        sha = "de0fac2e4500dabe0009e67214ff5f5447ce83dd"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workflows = root / ".github/workflows"
+            workflows.mkdir(parents=True)
+            (root / "bin").mkdir()
+            (root / "script").mkdir()
+            shutil.copy(self.repository / "script/materialize-git-tree", root / "script/materialize-git-tree")
+            ref = "v6.0.2" if staged == "tagged" else sha
+            workflow = "name: test\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@"
+            (workflows / "normal.yml").write_text(workflow + ref + "\n")
+            lock = ("version: 'v0.0.3'\nworkflows:\n  '.github/workflows/normal.yml':\n    - 'actions/checkout@"
+                    + ref + "'\ndependencies:\n  'actions/checkout@" + ref + "':\n    ref: '" + ref
+                    + "'\n    commit: 'sha1-" + sha + "'\n    owner_id: 44036562\n    repo_id: 197814629\n")
+            if staged == "transitive-tagged":
+                lock += ("    uses:\n      - 'actions/setup-go@v5'\n  'actions/setup-go@v5':\n    ref: 'v5'\n"
+                         "    commit: 'sha1-40f1582b2485089dde7abd97c1529aa768e1baff'\n"
+                         "    owner_id: 44036562\n    repo_id: 192624594\n")
+            if staged != "missing":
+                (workflows / "actions.lock").write_text("version: [malformed\n" if staged == "malformed" else lock)
+            if hidden:
+                (workflows / "ignored.yml").write_text(workflow + "v5.0.1\n")
+                if hidden == "ignore":
+                    (root / ".gitignore").write_text(".github/workflows/ignored.yml\n")
+                else:
+                    (root / ".gitattributes").write_text(".github/workflows/ignored.yml export-ignore\n")
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "add", "--force", "."], cwd=root, check=True)
+            if workspace:
+                (workflows / "actions.lock").write_text("version: [malformed\n" if workspace == "malformed" else lock)
+            go = root / "bin/go"
+            go.write_text("#!/usr/bin/env python3\nimport os, shutil, sys\n"
+                          "shutil.copy(os.environ['HOOK_TEST_CLI'], sys.argv[sys.argv.index('-o') + 1])\n")
+            go.chmod(0o755)
+            env = os.environ | {"PATH": str(root / "bin") + os.pathsep + os.environ["PATH"],
+                                "HOOK_TEST_CLI": str(self.binary),
+                                "GH_ACTIONS_LOCK_VERIFY_FROZEN": "0"}
+            hook = self.repository / ".githooks/pre-commit"
+            result = subprocess.run([str(hook)], cwd=root, env=env, capture_output=True, text=True)
+            return result
+
+    def test_staged_snapshot_and_offline_sha_policy(self):
+        cases = [
+            ("staged valid lock ignores malformed workspace", {"workspace": "malformed"}, 0),
+            ("staged malformed lock rejects valid workspace", {"staged": "malformed", "workspace": "valid"}, 1),
+            ("staged missing lock rejects unstaged replacement", {"staged": "missing", "workspace": "valid"}, 1),
+            ("mutable direct ref rejected", {"staged": "tagged"}, 1),
+            ("recorded mutable child rejected", {"staged": "transitive-tagged"}, 1),
+            ("tracked ignored workflow verified", {"hidden": "ignore"}, 1),
+            ("export-ignored workflow verified", {"hidden": "export"}, 1),
+        ]
+        for name, options, expected in cases:
+            with self.subTest(name=name):
+                result = self.check_snapshot(**options)
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+
+
+@unittest.skipUnless(shutil.which("git") and shutil.which("go"), "hook checks need git and Go")
+class HookBuildSnapshotTests(unittest.TestCase):
+    def test_verifier_is_built_from_partially_staged_source(self):
+        repository = Path(__file__).resolve().parent.parent
+        for staged_valid in (False, True):
+            with self.subTest(staged_valid=staged_valid), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "script").mkdir()
+                shutil.copy(repository / "script/materialize-git-tree", root / "script/materialize-git-tree")
+                command = root / "cmd/gh-actions-lock"
+                command.mkdir(parents=True)
+                (root / "go.mod").write_text("module hook-test\n\ngo 1.22\n")
+
+                def source(valid):
+                    value = "true" if valid else "false"
+                    return ('package main\nimport ("fmt"; "os")\nfunc main() {\n'
+                            'fmt.Println(`{"valid":' + value + ',"dependencies":[]}`)\n'
+                            'if !' + value + ' { os.Exit(1) }\n}\n')
+
+                main = command / "main.go"
+                main.write_text(source(staged_valid))
+                subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+                subprocess.run(["git", "add", "."], cwd=root, check=True)
+                main.write_text(source(not staged_valid))
+                env = os.environ | {"GH_ACTIONS_LOCK_VERIFY_FROZEN": "0", "GOWORK": "off"}
+                result = subprocess.run([str(repository / ".githooks/pre-commit")], cwd=root,
+                                        env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0 if staged_valid else 1, result.stdout + result.stderr)
+                if not staged_valid:
+                    self.assertFalse(json.loads(result.stderr)["valid"])
+
+
+if __name__ == "__main__":
+    unittest.main()

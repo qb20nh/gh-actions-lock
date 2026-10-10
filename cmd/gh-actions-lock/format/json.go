@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/github/gh-actions-lock/internal/ghapi"
+	"github.com/github/gh-actions-lock/internal/pin"
 	"github.com/github/gh-actions-lock/internal/pipeline/checks"
 )
 
@@ -34,7 +36,7 @@ func skipFindingInJSON(f checks.Finding) bool {
 // validJSONField reports whether name is a recognized --json output field.
 func validJSONField(name string) bool {
 	switch name {
-	case "valid", "findings", "workflows", "dependencies":
+	case "valid", "findings", "workflows", "dependencies", "pins":
 		return true
 	default:
 		return false
@@ -53,7 +55,7 @@ func ValidateJSONFields(fieldsCSV string) error {
 	for _, field := range strings.Split(fieldsCSV, ",") {
 		field = strings.TrimSpace(field)
 		if !validJSONField(field) {
-			return fmt.Errorf("unknown JSON field %q (expected valid, findings, workflows, dependencies)", field)
+			return fmt.Errorf("unknown JSON field %q (expected valid, findings, workflows, dependencies, pins)", field)
 		}
 	}
 	return nil
@@ -93,6 +95,23 @@ type Workflow struct {
 	Dependencies []Dependency `json:"dependencies,omitempty"`
 }
 
+// Pin distinguishes a proposed decision from an applied change. The other
+// fields describe the pre-fix diagnosis.
+type Pin struct {
+	Hostname     string `json:"hostname,omitempty"`
+	NWO          string `json:"nwo"`
+	Ref          string `json:"ref"`
+	SHA          string `json:"sha,omitempty"`
+	Outcome      string `json:"outcome"`
+	Applied      bool   `json:"applied"`
+	NarrowedFrom string `json:"narrowed_from,omitempty"`
+	ObservedSHA  string `json:"observed_sha,omitempty"`
+	Reason       string `json:"reason,omitempty"`
+}
+
+// AllJSONFields selects every --json field.
+const AllJSONFields = "valid,findings,workflows,dependencies,pins"
+
 // findingFromReport converts an checks.Finding to a JSON-safe Finding.
 func findingFromReport(f checks.Finding) Finding {
 	jf := Finding{
@@ -118,8 +137,9 @@ func findingFromReport(f checks.Finding) Finding {
 // WriteJSON writes the unified JSON output for `check --json`. fieldsCSV is
 // the comma-separated user selection (e.g. "valid,findings,workflows").
 // cliVersion and lockfileVersion are emitted as top-level fields so consumers
-// can pin behavior to a known schema.
-func WriteJSON(w io.Writer, report *checks.Report, valid bool, fieldsCSV, cliVersion, lockfileVersion, homeHost string) error {
+// can pin behavior to a known schema. record is nil when no fix was planned,
+// which emits an empty pins list.
+func WriteJSON(w io.Writer, report *checks.Report, record *pin.Record, valid bool, fieldsCSV, cliVersion, lockfileVersion, homeHost string) error {
 	fields := strings.Split(fieldsCSV, ",")
 	outputHostname := func(host string) string {
 		if ghapi.IsProxima(homeHost) && host == "github.com" {
@@ -250,12 +270,108 @@ func WriteJSON(w io.Writer, report *checks.Report, valid bool, fieldsCSV, cliVer
 			payload[field] = buildDeps()
 		case "workflows":
 			payload[field] = buildWorkflows()
+		case "pins":
+			payload[field] = pinsFromRecord(record, report)
 		default:
-			return fmt.Errorf("unknown JSON field %q (expected valid, findings, workflows, dependencies)", field)
+			return fmt.Errorf("unknown JSON field %q (expected valid, findings, workflows, dependencies, pins)", field)
 		}
 	}
 
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(payload)
+}
+
+// pinsFromRecord lists one Pin per host/NWO@Ref; the record holds one entry
+// per workflow that uses the action. Host and NWO are case-insensitive, refs
+// are not (see ghapi.ForNWORef).
+//
+// Plan carries a blocked workflow's lock entries forward as Verified so Commit
+// keeps them. A pin used only by blocked workflows was not checked this run,
+// so it is reported as skipped.
+func pinsFromRecord(record *pin.Record, report *checks.Report) []Pin {
+	pins := []Pin{}
+	if record == nil {
+		return pins
+	}
+	blocked := map[string]bool{}
+	if report != nil {
+		for _, wr := range report.Workflows {
+			if wr.SkipCommit || wr.BlockingResolverError {
+				blocked[wr.Path] = true
+			}
+		}
+	}
+	index := map[string]int{}
+	checked := map[string]bool{}
+	for _, e := range record.Entries {
+		key := strings.ToLower(e.Hostname+"/"+e.NWO) + "@" + e.Ref
+		for _, w := range e.Workflows {
+			if !blocked[w] {
+				checked[key] = true
+			}
+		}
+		p := Pin{
+			Hostname:     e.Hostname,
+			NWO:          e.NWO,
+			Ref:          e.Ref,
+			SHA:          e.SHA,
+			Outcome:      e.Resolution.String(),
+			Applied:      record.Committed && (e.Resolution == pin.Pinned || e.AutoFixedRef != ""),
+			NarrowedFrom: e.AutoFixedRef,
+			ObservedSHA:  e.ObservedSHA,
+			Reason:       e.Reason,
+		}
+		if i, ok := index[key]; ok {
+			current := &pins[i]
+			applied := current.Applied || p.Applied
+			narrowedFrom := max(current.NarrowedFrom, p.NarrowedFrom)
+			priority, currentPriority := pinOutcomePriority(p), pinOutcomePriority(*current)
+			// Keep the diagnosis with the dominant outcome. Equal outcomes
+			// choose a stable diagnosis rather than depending on workflow order.
+			diagnosisOrder := slices.Compare(
+				[]string{p.Reason, p.ObservedSHA, p.SHA, p.Hostname, p.NWO},
+				[]string{current.Reason, current.ObservedSHA, current.SHA, current.Hostname, current.NWO},
+			)
+			if priority > currentPriority || priority == currentPriority && diagnosisOrder > 0 {
+				*current = p
+			}
+			current.Applied = applied
+			current.NarrowedFrom = narrowedFrom
+			continue
+		}
+		index[key] = len(pins)
+		pins = append(pins, p)
+	}
+	for _, i := range index {
+		if !record.Committed && (pins[i].Outcome == pin.Pinned.String() ||
+			pins[i].Outcome == pin.Verified.String() && pins[i].NarrowedFrom != "") {
+			pins[i].Outcome = "planned"
+		}
+	}
+	for key, i := range index {
+		if !checked[key] && pins[i].Outcome == pin.Verified.String() {
+			pins[i].Outcome = pin.Skipped.String()
+			pins[i].Reason = "workflow blocked; lock entry left unchanged"
+		}
+	}
+	return pins
+}
+
+func pinOutcomePriority(p Pin) int {
+	switch p.Outcome {
+	case pin.Unresolved.String():
+		return 5
+	case pin.Investigate.String():
+		return 4
+	case pin.Pinned.String():
+		return 3
+	case pin.Verified.String():
+		if p.NarrowedFrom != "" {
+			return 2
+		}
+		return 1
+	default:
+		return 0
+	}
 }

@@ -39,11 +39,11 @@ func execute() int {
 	switch {
 	case err == nil:
 		return 0
-	case errors.Is(err, errSilent):
+	case err == errSilent:
 		// Blocking findings were already reported via well-formed output; exit
 		// 1 quietly so a second error line doesn't clobber the JSON/summary.
 		return 1
-	case errors.Is(err, context.Canceled):
+	case err == context.Canceled:
 		// CTRL+C / SIGTERM: exit silently. The signal is intentional, not a
 		// tool failure. Print a newline so the shell prompt starts clean.
 		fmt.Fprintln(os.Stderr)
@@ -119,12 +119,27 @@ touched. Only refs that parse as semantic versions (v4, v3.2) are
 candidates; branch names (main, canary) and non-version tags are
 never narrowed because the latest semver release in a repo may have
 nothing to do with the ref the workflow intended.
-Pass --no-narrow to disable this behavior entirely.
+Pass --no-narrow to disable this behavior entirely and preserve explicit
+commit SHA references.
+
+For execution independent of lockfile enforcement, use full commit SHAs
+throughout the dependency graph and run --verify-frozen. This read-only,
+authenticated mode inspects action and reusable workflow manifests at their
+defining commits, rejects mutable child refs, and requires a nonempty regular
+lockfile. Use --verify-local --require-lockfile for an offline pre-commit check.
 
 --json selects the output format only (independent of --no-fix);
 structured results go to stdout and progress to stderr:
 
   gh actions-lock --no-fix --json 2>/dev/null | jq .valid
+
+RUN LOGS
+
+Every run except --verify-local saves its full --json output, plus the
+repository and whether the run succeeded (with its error, if any), to
+<user cache dir>/gh-actions-lock/logs/ (on macOS,
+~/Library/Caches/gh-actions-lock/logs). Failed runs print the path.
+Logs are kept for 14 days, up to 50. Attach the log to bug reports.
 `),
 		Example: heredoc.Doc(`
 # Verify all workflows and fix what's fixable
@@ -188,18 +203,20 @@ func newRun(workflowPaths []string, hostname string, pool *pinpool.Pool, newReso
 		return lockfile.LoadState(".", meta)
 	}
 	store, err := loadStore(nil)
+	recovered := false
 	if err != nil {
 		if errors.Is(err, lockfile.ErrCorruptLockfile) && onCorrupt != nil {
 			lockPath := filepath.Join(".", parserlock.Path)
 			if workflowsDir != "" {
 				lockPath = filepath.Join(workflowsDir, "actions.lock")
 			}
-			recovered, rerr := onCorrupt(lockPath, err)
+			var rerr error
+			recovered, rerr = onCorrupt(lockPath, err)
 			if rerr != nil {
 				return nil, nil, nil, rerr
 			}
 			if recovered {
-				store, err = loadStore(nil)
+				store, err = lockfile.LoadStateForRecoveryAt(lockPath, nil)
 			}
 		}
 		if err != nil {
@@ -213,12 +230,9 @@ func newRun(workflowPaths []string, hostname string, pool *pinpool.Pool, newReso
 		}
 	}
 
-	// An empty full scan is only meaningful when the lockfile still records
-	// workflows to prune. With nothing on disk and nothing recorded, there's
-	// genuinely no work — keep the original "no workflow files" error, and
-	// emit it before auth so an empty repo doesn't complain about a missing
-	// token.
-	if len(paths) == 0 && len(store.WorkflowKeys()) == 0 {
+	// An empty full scan must commit a confirmed recovery or prune recorded
+	// workflows. Otherwise emit the "no workflow files" error before auth.
+	if len(paths) == 0 && len(store.WorkflowKeys()) == 0 && !recovered {
 		return nil, nil, nil, noWorkflowsError(workflowsDir)
 	}
 
@@ -233,29 +247,50 @@ func newRun(workflowPaths []string, hostname string, pool *pinpool.Pool, newReso
 }
 
 func discoverWorkflowPaths(existing []string, workflowsDir string, allowEmpty bool) ([]string, error) {
+	var paths []string
+	var err error
 	if len(existing) > 0 {
-		return expandWorkflowPaths(existing)
+		paths, err = expandWorkflowPaths(existing)
+	} else if workflowsDir != "" {
+		paths, err = workflowfile.DiscoverWorkflowsIn(workflowsDir)
+	} else {
+		paths, err = workflowfile.DiscoverWorkflows()
 	}
-
-	if workflowsDir != "" {
-		paths, err := workflowfile.DiscoverWorkflowsIn(workflowsDir)
-		if err != nil {
-			return nil, err
-		}
-		if len(paths) == 0 && !allowEmpty {
-			return nil, noWorkflowsError(workflowsDir)
-		}
-		return paths, nil
-	}
-
-	paths, err := workflowfile.DiscoverWorkflows()
 	if err != nil {
 		return nil, err
 	}
 	if len(paths) == 0 && !allowEmpty {
 		return nil, noWorkflowsError(workflowsDir)
 	}
-	return paths, nil
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	canonical := make([]string, 0, len(paths))
+	for _, path := range paths {
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			return nil, err
+		}
+		rel, err := filepath.Rel(cwd, absPath)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("workflow %s is outside the current repository directory", path)
+		}
+		if err := workflowfile.ValidatePathWithinRoot(cwd, path); err != nil {
+			// Keep missing-file errors at the parsing boundary, as before.
+			if !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
+		}
+		key := filepath.ToSlash(filepath.Clean(rel))
+		if !seen[key] {
+			canonical = append(canonical, key)
+			seen[key] = true
+		}
+	}
+	sort.Strings(canonical)
+	return canonical, nil
 }
 
 // noWorkflowsError returns the error emitted when a scan finds no workflow

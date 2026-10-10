@@ -1,0 +1,10 @@
+# GitHub reads ownership from the PR's base branch. See docs/actions-protection.md.
+/.github/ @qb20nh
+/.githooks/ @qb20nh
+/script/ @qb20nh
+/cmd/gh-actions-lock/ @qb20nh
+/internal/ @qb20nh
+/go.mod @qb20nh
+/go.sum @qb20nh
+/Makefile @qb20nh
+/docs/actions-protection.md @qb20nh

@@ -8,6 +8,8 @@ package checks
 type Category string
 
 const (
+	// MutableReference means execution depends on a remote tag or branch.
+	MutableReference Category = "mutable-reference"
 	// NotPinned means the workflow has action refs but no
 	// corresponding dependencies entry in the lockfile.
 	NotPinned Category = "not-pinned"
@@ -33,6 +35,18 @@ const (
 	// entry was tampered with. The check can't distinguish those, so it
 	// fails closed without asserting an attack.
 	UnreachablePin Category = "unreachable-pin"
+	// RepoRenamed means a locked dependency's repository was renamed or
+	// transferred but kept its repo ID. Old names fail in GitHub Actions;
+	// fix mode rewrites direct `uses:` while keeping the locked commit.
+	// A reference inside a remote dependency requires updating its parent.
+	RepoRenamed Category = "repo-renamed"
+	// RepoHijacked means a locked dependency's name resolves to a different
+	// repo ID. The runner rejects the pin, and re-locking under the old name
+	// cannot fix it.
+	RepoHijacked Category = "repo-hijacked"
+	// RepoUnavailable means a locked dependency's repository returned 404.
+	// That covers both deleted repositories and ones the token can't see.
+	RepoUnavailable Category = "repo-unavailable"
 	// Valid means the dependency is pinned and verified.
 	Valid Category = "valid"
 	// RunOnly means the workflow has no action refs (only run:

@@ -7,9 +7,17 @@ permissions:
   contents: read
 
 jobs:
+  lock-validation:
+    uses: ./.github/workflows/lock-validation.yml
+    with:
+      source-sha: ${{ github.workflow_sha }}
+      workflow-path: .github/workflows/dependency-review.yml
+
   dependency-review:
+    needs: lock-validation
+    if: needs.lock-validation.result == 'success'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5.0.1
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
       - name: Dependency Review
-        uses: actions/dependency-review-action@v5.0.0
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0

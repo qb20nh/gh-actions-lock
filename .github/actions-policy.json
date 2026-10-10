@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "required_check": {
+    "context": "Lock policy",
+    "app_id": 15368
+  },
+  "patterns_allowed": [
+    "actions/attest-build-provenance/predicate@36fa7d009e22618ca7cd599486979b8150596c74",
+    "actions/attest-build-provenance@ef244123eb79f2f7a7e75d99086184180e6d0018",
+    "actions/attest@67422f5511b7ff725f4dbd6fb9bd2cd925c65a8d",
+    "actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd",
+    "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+    "actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294",
+    "actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff",
+    "actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c"
+  ]
+}

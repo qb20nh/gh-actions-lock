@@ -2,6 +2,8 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
 	"strings"
 
 	parserlock "github.com/github/actions-lockfile/go/pkg/lockfile"
@@ -53,12 +55,34 @@ func ParseAll(paths []string, store *lockfile.State) []checks.ParsedWorkflow {
 			out = append(out, pw)
 			continue
 		}
+		absolutePath, err := filepath.Abs(path)
+		if err != nil {
+			pw.LoadErr = fmt.Errorf("resolving workflow path: %w", err)
+			out = append(out, pw)
+			continue
+		}
+		resolvedPath, err := filepath.EvalSymlinks(absolutePath)
+		if err != nil {
+			pw.LoadErr = fmt.Errorf("resolving workflow path: %w", err)
+			out = append(out, pw)
+			continue
+		}
 		scan := wf.ExtractActionRefs()
-		selfScan := workflowfile.ScanSelfRepositoryActions(path, scan.SelfRepositoryActionRefs)
+		selfScan := workflowfile.ScanSelfRepositoryActions(path, scan.SelfRepositoryActionRefs, scan.LocalWorkflowRefs...)
+		pw.SourceContents = selfScan.SourceContents
+		if pw.SourceContents == nil {
+			pw.SourceContents = make(map[string][]byte)
+		}
+		pw.SourceContents[path] = wf.Content
+		pw.SourcePaths = selfScan.SourcePaths
+		if pw.SourcePaths == nil {
+			pw.SourcePaths = make(map[string]string)
+		}
+		pw.SourcePaths[path] = resolvedPath
 
 		pw.Refs = mergeActionRefs(scan.Refs, selfScan.Refs)
-		// Refs inside `$/…` actions are rewritable too: their action file is
-		// rewritten alongside the workflow, so narrowing stays in sync.
+		// Reachable repository definitions are rewritten alongside this
+		// workflow, so their narrowed refs remain covered by its lock entry.
 		pw.RewriteRefs = pw.Refs
 		pw.SelfActionFiles = selfScan.ActionFiles
 		pw.SelfActionRefs = selfScan.Refs

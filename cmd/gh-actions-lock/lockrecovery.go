@@ -54,8 +54,8 @@ func ciEnabled() bool {
 }
 
 // lockRecovery decides what to do when the on-disk lockfile can't be parsed.
-// It returns (true, nil) when the lockfile was removed and loading should be
-// retried (the empty-lockfile path then recreates it), or a non-nil error to
+// It returns (true, nil) when rebuilding was confirmed and an empty candidate
+// may be loaded while preserving the original file until commit, or a non-nil error to
 // abort the run (exit 2). It never silently accepts an unreadable lockfile.
 type lockRecovery func(lockPath string, parseErr error) (recovered bool, err error)
 
@@ -88,10 +88,7 @@ func newLockRecovery(noInteractive bool, console *ui.UI, newConfirm confirmFacto
 		if !ok {
 			return false, fmt.Errorf("%w; left in place", parseErr)
 		}
-		if err := os.Remove(lockPath); err != nil {
-			return false, fmt.Errorf("deleting unreadable lockfile %s: %w", lockPath, err)
-		}
-		console.TermNeutral("Deleted unreadable lockfile %s; it will be recreated.", lockPath)
+		console.TermNeutral("Will rebuild unreadable lockfile %s after validation.", lockPath)
 		return true, nil
 	}
 }

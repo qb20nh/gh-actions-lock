@@ -4,86 +4,216 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
-// RewriteActionRefs rewrites targeted uses: refs in the original workflow
-// content while preserving the surrounding formatting and comments.
+// RewriteActionRefs rewrites dependency uses: values without changing other YAML
+// data. Unsupported scalar or alias rewrites return the original content.
 func (f *File) RewriteActionRefs(replacements map[string]string) ([]byte, int, error) {
+	content, changed, _, err := f.rewriteActionRefs(replacements)
+	return content, changed, err
+}
+
+// ValidateRequiredActionRefRewrites reports matched dependency locations after
+// checking that every matching replacement can be applied safely.
+func (f *File) ValidateRequiredActionRefRewrites(replacements map[string]string) (map[string]int, error) {
+	_, _, matches, err := f.rewriteActionRefs(replacements)
+	return matches, err
+}
+
+type sourceEdit struct {
+	start, end int
+	value      string
+}
+
+func (f *File) rewriteActionRefs(replacements map[string]string) ([]byte, int, map[string]int, error) {
+	original := append([]byte(nil), f.Content...)
+	matches := make(map[string]int)
 	if len(replacements) == 0 {
-		return append([]byte(nil), f.Content...), 0, nil
+		return original, 0, matches, nil
 	}
 
 	lines := strings.Split(string(f.Content), "\n")
-	changed := 0
-
-	walkYAMLNodes(&f.root, func(keyNode, valueNode *yaml.Node) {
-		if keyNode == nil || valueNode == nil || keyNode.Value != "uses" || valueNode.Kind != yaml.ScalarNode {
-			return
-		}
-		// Skip aliases / nodes that came from anchors. Replacing one
-		// anchor reference would silently change every other use site.
-		if valueNode.Alias != nil || valueNode.Anchor != "" {
-			return
-		}
-
-		oldValue := strings.TrimSpace(valueNode.Value)
-		newValue, ok := replacements[oldValue]
+	lineOffsets := make([]int, len(lines))
+	for i := 1; i < len(lines); i++ {
+		lineOffsets[i] = lineOffsets[i-1] + len(lines[i-1]) + 1
+	}
+	var edits []sourceEdit
+	var expected []string
+	var rewriteErr error
+	walkUseSites(&f.root, func(site useSite) {
+		oldValue := strings.TrimSpace(site.node.Value)
+		newValue, key, ok := actionRefReplacement(oldValue, replacements)
 		if !ok {
-			// Sub-path actions: uses: owner/repo/path@ref should match
-			// a rewrite keyed on owner/repo@ref (NWO-level granularity).
-			newValue, ok = subpathRewriteLookup(oldValue, replacements)
-		}
-		if !ok || newValue == "" || newValue == oldValue {
+			expected = append(expected, oldValue)
 			return
 		}
-
-		// Anchor the rewrite at the YAML node's reported (line, column)
-		// rather than scanning the line for the first occurrence of
-		// oldValue. The previous strings.Index(...) approach would
-		// happily substitute matching text inside a YAML comment that
-		// preceded the value.
-		lineIndex := valueNode.Line - 1
-		colIndex := valueNode.Column - 1
-		if lineIndex < 0 || lineIndex >= len(lines) || colIndex < 0 {
-			return
-		}
-		line := lines[lineIndex]
-		if colIndex+len(oldValue) > len(line) {
-			return
-		}
-		// Quoted scalars report Column at the opening quote; the actual
-		// value sits one byte further in.
-		if valueNode.Style == yaml.SingleQuotedStyle || valueNode.Style == yaml.DoubleQuotedStyle {
-			if colIndex+1+len(oldValue) > len(line) {
-				return
+		matches[key]++
+		if newValue == "" {
+			if rewriteErr == nil {
+				rewriteErr = fmt.Errorf("action rewrite for %s has an empty replacement", oldValue)
 			}
-			if line[colIndex+1:colIndex+1+len(oldValue)] != oldValue {
-				return
-			}
-			lines[lineIndex] = line[:colIndex+1] + newValue + stripTrailingComment(line[colIndex+1+len(oldValue):])
-			changed++
 			return
 		}
-		if line[colIndex:colIndex+len(oldValue)] != oldValue {
+		expected = append(expected, newValue)
+		if newValue == oldValue {
 			return
 		}
-		lines[lineIndex] = line[:colIndex] + newValue + stripTrailingComment(line[colIndex+len(oldValue):])
-		changed++
+		if rewriteErr != nil {
+			return
+		}
+		if site.anchored {
+			rewriteErr = fmt.Errorf("action rewrite for %s cannot update an anchored or aliased `uses:` value", oldValue)
+			return
+		}
+		edit, err := scalarSourceEdit(site.node, newValue, lines, lineOffsets)
+		if err != nil {
+			rewriteErr = fmt.Errorf("action rewrite for %s: %w", oldValue, err)
+			return
+		}
+		edits = append(edits, edit)
 	})
+	if rewriteErr != nil {
+		return original, 0, nil, rewriteErr
+	}
+	if len(edits) == 0 {
+		return original, 0, matches, nil
+	}
 
-	return []byte(strings.Join(lines, "\n")), changed, nil
+	// Source coordinates describe the original bytes, so apply edits backwards.
+	sort.Slice(edits, func(i, j int) bool { return edits[i].start > edits[j].start })
+	content := original
+	previous := len(content)
+	for _, edit := range edits {
+		if edit.end > previous {
+			return original, 0, nil, fmt.Errorf("action rewrites have overlapping source locations")
+		}
+		content = append(append(append([]byte(nil), content[:edit.start]...), edit.value...), content[edit.end:]...)
+		previous = edit.start
+	}
+
+	parsed, err := Parse(f.Path, content)
+	if err != nil {
+		return original, 0, nil, fmt.Errorf("validating rewritten YAML: %w", err)
+	}
+	var actual []string
+	walkUseSites(&parsed.root, func(site useSite) {
+		actual = append(actual, strings.TrimSpace(site.node.Value))
+	})
+	if len(actual) != len(expected) {
+		return original, 0, nil, fmt.Errorf("action rewrite changed the number of dependency locations")
+	}
+	for i, value := range actual {
+		if value != expected[i] {
+			return original, 0, nil, fmt.Errorf("action rewrite did not preserve dependency location %d", i+1)
+		}
+	}
+	return content, len(edits), matches, nil
+}
+
+func actionRefReplacement(value string, replacements map[string]string) (string, string, bool) {
+	if replacement, ok := replacements[value]; ok {
+		return replacement, value, true
+	}
+	replacement, ok := subpathRewriteLookup(value, replacements)
+	if !ok {
+		return "", "", false
+	}
+	at := strings.LastIndex(value, "@")
+	parts := strings.SplitN(value[:at], "/", 3)
+	return replacement, parts[0] + "/" + parts[1] + value[at:], true
+}
+
+func scalarSourceEdit(node *yaml.Node, value string, lines []string, offsets []int) (sourceEdit, error) {
+	if node.Style&(yaml.FoldedStyle|yaml.LiteralStyle) != 0 {
+		return sourceEdit{}, fmt.Errorf("multiline `uses:` values cannot be rewritten")
+	}
+	lineIndex := node.Line - 1
+	if lineIndex < 0 || lineIndex >= len(lines) || node.Column < 1 {
+		return sourceEdit{}, fmt.Errorf("invalid YAML source location")
+	}
+	line := lines[lineIndex]
+	start, ok := columnByteOffset(line, node.Column)
+	if !ok {
+		return sourceEdit{}, fmt.Errorf("invalid YAML source column")
+	}
+	end := start
+	replacement := value
+	switch {
+	case node.Style&yaml.SingleQuotedStyle != 0:
+		var err error
+		end, err = quotedScalarEnd(line, start, '\'')
+		if err != nil {
+			return sourceEdit{}, err
+		}
+		replacement = "'" + strings.ReplaceAll(value, "'", "''") + "'"
+	case node.Style&yaml.DoubleQuotedStyle != 0:
+		var err error
+		end, err = quotedScalarEnd(line, start, '"')
+		if err != nil {
+			return sourceEdit{}, err
+		}
+		replacement = strconv.Quote(value)
+	default:
+		end += len(node.Value)
+		if end > len(line) || line[start:end] != node.Value {
+			return sourceEdit{}, fmt.Errorf("multiline or unsupported `uses:` scalar")
+		}
+	}
+
+	// Only a comment immediately following this scalar can be removed. A # in
+	// another flow-mapping value belongs to that value, not to this uses: field.
+	tail := line[end:]
+	if strings.HasPrefix(strings.TrimLeft(tail, " \t"), "#") {
+		end = len(line)
+		if strings.HasSuffix(line, "\r") {
+			end--
+		}
+	}
+	return sourceEdit{start: offsets[lineIndex] + start, end: offsets[lineIndex] + end, value: replacement}, nil
+}
+
+func columnByteOffset(line string, column int) (int, bool) {
+	current := 1
+	for offset := range line {
+		if current == column {
+			return offset, true
+		}
+		current++
+	}
+	return len(line), current == column
+}
+
+func quotedScalarEnd(line string, start int, quote byte) (int, error) {
+	if start >= len(line) || line[start] != quote {
+		return 0, fmt.Errorf("quoted `uses:` scalar does not match its source location")
+	}
+	for i := start + 1; i < len(line); i++ {
+		if quote == '"' && line[i] == '\\' {
+			i++
+			continue
+		}
+		if line[i] != quote {
+			continue
+		}
+		if quote == '\'' && i+1 < len(line) && line[i+1] == quote {
+			i++
+			continue
+		}
+		return i + 1, nil
+	}
+	return 0, fmt.Errorf("multiline quoted `uses:` values cannot be rewritten")
 }
 
 // MigrateLocalActionsToSelfRepository rewrites same-repo `./…` composite action
-// references to the inherently-pinned `$/…` form. Only local paths that
-// resolve to an in-repo action file are rewritten — that in-repo existence is
-// the same-repo equivalence guard that makes `$/` a safe replacement for
-// `./`. Local reusable workflows are never candidates (ExtractActionRefs
-// excludes them). Returns the new content and the number of `uses:` lines
-// changed.
+// references to `$/…`. Callers must opt in after accounting for checkout
+// semantics; an in-repo action file does not prove runtime equivalence.
+// Local reusable workflows are never candidates. It returns the new content
+// and the number of dependency locations changed.
 func (f *File) MigrateLocalActionsToSelfRepository() ([]byte, int, error) {
 	scan := f.ExtractActionRefs()
 	if err := f.validateSelfRepositoryMigration(scan); err != nil {
@@ -170,15 +300,5 @@ func subpathRewriteLookup(usesValue string, replacements map[string]string) (str
 		return "", false
 	}
 	newRef := newNWOValue[newAtIdx+1:]
-	return nwo + "/" + subPath + "@" + newRef, true
-}
-
-// stripTrailingComment removes a trailing YAML comment (# ...) from the
-// remainder of a line after the uses: value has been replaced.
-func stripTrailingComment(tail string) string {
-	idx := strings.Index(tail, "#")
-	if idx < 0 {
-		return tail
-	}
-	return strings.TrimRight(tail[:idx], " \t")
+	return newNWOValue[:newAtIdx] + "/" + subPath + "@" + newRef, true
 }

@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -32,10 +33,6 @@ type checkOptions struct {
 	workflowPaths []string
 	jsonFields    string
 	hostname      string
-	// rescan forces a full reachability re-verification of every recorded
-	// pin, bypassing the fast path that trusts the lockfile. Useful for
-	// audits or when a CI policy requires re-attestation on every run.
-	rescan bool
 	// profileDir, when non-empty, enables profiling: execution trace,
 	// CPU profile, and HTTP request log are written to files in this dir.
 	profileDir string
@@ -62,43 +59,51 @@ type checkOptions struct {
 	// Unlike acceptMoved it does NOT accept unreachable-pin findings
 	// (possible tampering), which stay hard errors.
 	relock bool
-	// verify is a convenience alias for --rescan --no-fix: full
-	// re-verification of every pin with a non-zero exit on any finding.
+	// verify is the frozen mode: the default checks with --no-fix and a
+	// non-zero exit on any blocking finding.
 	verify bool
 	// verifyLocal performs a zero-network static check: every action ref
 	// in scanned workflows must have a corresponding lockfile entry.
 	// No auth, no resolution, no reachability — ideal for pre-commit hooks.
 	verifyLocal bool
-	// noMigrateLocalActions opts out of rewriting same-repo `./…` composite
-	// action refs to the inherently-pinned `$/…` form. Migration runs by
-	// default on fix runs; set this to leave `./…` refs on disk untouched.
+	// verifyFrozen checks the actual dependency manifests for immutable refs.
+	verifyFrozen bool
+	// requireLockfile refuses an absent, empty, or symlinked lockfile.
+	requireLockfile bool
+	// migrateLocalActions explicitly changes workspace-relative action references
+	// to defining-repository references after the user has checked equivalence.
+	migrateLocalActions   bool
 	noMigrateLocalActions bool
 }
 
 // bindCheckFlags registers the run flags on the root command.
 func bindCheckFlags(cmd *cobra.Command, opts *checkOptions) {
-	cmd.Flags().StringVar(&opts.jsonFields, "json", "", "Output JSON with the specified `fields` (valid,findings,workflows,dependencies)")
+	cmd.Flags().StringVar(&opts.jsonFields, "json", "", "Output JSON with the specified `fields` (valid,findings,workflows,dependencies,pins)")
 	cmd.Flags().Lookup("json").NoOptDefVal = "valid,findings,workflows"
 	cmd.Flags().StringVar(&opts.hostname, "hostname", "", "GitHub hostname to query (defaults to GH_HOST, current repo host, or github.com)")
-	cmd.Flags().BoolVar(&opts.rescan, "rescan", false, "Re-verify reachability for every recorded pin (bypasses the lockfile fast path)")
 	cmd.Flags().BoolVar(&opts.noFix, "no-fix", false, "Read-only: report findings without modifying workflows or the lockfile")
 	cmd.Flags().BoolVar(&opts.noNarrow, "no-narrow", false,
-		"Keep mutable version refs (e.g. v4) instead of narrowing to full semver (e.g. v4.2.1).\n"+
+		"Preserve explicit commit SHAs and keep mutable refs instead of narrowing to full semver.\n"+
 			"Only refs that parse as semantic versions are narrowed (v4, v4.2); branch names\n"+
 			"like 'main' or non-version tags are never narrowed because a full semver tag is\n"+
 			"far more likely to resolve to exactly one commit for its entire lifetime.")
 	cmd.Flags().StringSliceVar(&opts.allowRunners, "allow-runners", nil, "Deprecated no-op: runner restrictions have been removed")
 	cmd.Flags().BoolVarP(&opts.allowAllRunners, "allow-all-runners", "A", false, "Deprecated no-op: runner restrictions have been removed")
 	cmd.Flags().BoolVar(&opts.acceptMoved, "accept-moved", false, "Re-resolve deps flagged as ref-moved or unreachable-pin to their current live SHA")
-	cmd.Flags().BoolVar(&opts.relock, "relock", false, "Bump moved branch/version refs (e.g. main, v4) to their current upstream SHA; leaves unreachable pins as errors")
-	cmd.Flags().BoolVar(&opts.verify, "verify", false, "Full re-verification of every pin (equivalent to --rescan --no-fix)")
+	cmd.Flags().BoolVar(&opts.relock, "relock", false, "Re-resolve every ref and advance moved ones (e.g. main, v4) to their current upstream SHA; leaves unreachable pins as errors")
+	cmd.Flags().BoolVar(&opts.verify, "verify", false, "Frozen check: run the same checks as the default without writing; fails if the lockfile is incomplete or the runner would reject a pin")
 	cmd.Flags().BoolVar(&opts.verifyLocal, "verify-local", false,
 		"Offline lockfile coverage check: verify every action ref has a lockfile entry.\n"+
 			"No network calls, no authentication required — ideal for pre-commit hooks.")
+	cmd.Flags().BoolVar(&opts.verifyFrozen, "verify-frozen", false,
+		"Read-only authenticated check: require a lockfile and full commit SHA refs throughout the discovered dependency graph")
+	cmd.Flags().BoolVar(&opts.requireLockfile, "require-lockfile", false,
+		"Require a nonempty regular lockfile with no symlinked path components")
 	cmd.Flags().StringVar(&opts.profileDir, "profile", "", "Enable profiling: write trace, CPU profile, and HTTP log to `dir`")
+	cmd.Flags().BoolVar(&opts.migrateLocalActions, "migrate-local-actions", false,
+		"Rewrite selected same-repo ./ action references to $/; confirm checkout and generated-file semantics before enabling")
 	cmd.Flags().BoolVar(&opts.noMigrateLocalActions, "no-migrate-local-actions", false,
-		"Do not rewrite same-repo `uses: ./…` actions to the inherently-pinned `uses: $/…` form.\n"+
-			"Migration runs by default on fix runs; this leaves `./…` refs on disk untouched.")
+		"Disable local-action migration (migration is opt-in)")
 }
 
 // validateOutputFlags rejects incoherent structured-output flag combinations.
@@ -110,13 +115,22 @@ func (opts *checkOptions) validateOutputFlags() error {
 	if opts.verify && opts.verifyLocal {
 		return fmt.Errorf("--verify and --verify-local are mutually exclusive")
 	}
-	if opts.verifyLocal && (opts.rescan || opts.acceptMoved || opts.relock) {
-		return fmt.Errorf("--verify-local cannot be combined with --rescan, --accept-moved, or --relock because it runs offline")
+	if opts.verifyFrozen && opts.verifyLocal {
+		return fmt.Errorf("--verify-frozen and --verify-local are mutually exclusive")
+	}
+	if opts.verifyFrozen && (opts.acceptMoved || opts.relock || opts.migrateLocalActions) {
+		return fmt.Errorf("--verify-frozen cannot be combined with --accept-moved, --relock, or --migrate-local-actions")
+	}
+	if opts.verifyLocal && (opts.acceptMoved || opts.relock) {
+		return fmt.Errorf("--verify-local cannot be combined with --accept-moved or --relock because it runs offline")
+	}
+	if opts.migrateLocalActions && opts.noMigrateLocalActions {
+		return fmt.Errorf("--migrate-local-actions and --no-migrate-local-actions are mutually exclusive")
 	}
 	return nil
 }
 
-func runCheck(cmd *cobra.Command, opts *checkOptions, newResolver resolverFunc) error {
+func runCheck(cmd *cobra.Command, opts *checkOptions, newResolver resolverFunc) (runErr error) {
 	ctx := cmd.Context()
 	if ctx == nil {
 		ctx = context.Background()
@@ -128,11 +142,26 @@ func runCheck(cmd *cobra.Command, opts *checkOptions, newResolver resolverFunc) 
 
 	// Expand verify mode flags (see verify.go for both modes).
 	applyVerifyFlags(opts)
+	if opts.requireLockfile {
+		if err := requireLockfile(); err != nil {
+			return err
+		}
+	}
 
 	// --verify-local: offline static coverage check. Skip all network setup.
 	if opts.verifyLocal {
 		return runVerifyLocal(opts, out, console)
 	}
+
+	// Every exit path below writes exactly one run log, judged by runErr, so
+	// the log can never call a failed run valid.
+	rl := &runLog{}
+	defer func() {
+		if path := rl.save(runErr); path != "" && runErr != nil && opts.jsonFields == "" {
+			console.TermBlank()
+			console.TermDetail("Run log: %s", path)
+		}
+	}()
 
 	// Profiling: when --profile is set, start trace + CPU profile + HTTP log.
 	var prof *profile.Session
@@ -169,14 +198,14 @@ func runCheck(cmd *cobra.Command, opts *checkOptions, newResolver resolverFunc) 
 	// this before newRun overwrites opts.workflowPaths with the discovered
 	// set.
 	fullScan := len(opts.workflowPaths) == 0
-	// check fix mode can rebuild a deleted lockfile, so interactive sessions
-	// may delete-and-recreate an unreadable one. --no-fix is read-only and
-	// must not delete; it fails instead.
+	// Recovery creates an in-memory replacement; the original stays on disk
+	// until all checks pass. Read-only runs refuse recovery.
 	recoverLock := newLockRecovery(noInteractiveFlag(cmd), console, confirmFactoryHook, !opts.noFix)
 	paths, r, store, err := newRun(opts.workflowPaths, opts.hostname, pool, newResolver, recoverLock)
 	if err != nil {
 		return err
 	}
+	rl.resolver, rl.store = r, store
 	var staleWorkflows []string
 	if fullScan {
 		keepWorkflows := make(map[string]bool, len(paths))
@@ -219,28 +248,37 @@ func runCheck(cmd *cobra.Command, opts *checkOptions, newResolver resolverFunc) 
 		return err
 	}
 	r.SeedBranchHints(store.AllDeps())
-	// Pre-warm resolver caches from the lockfile so repeat runs skip
-	// redundant GraphQL and REST calls. Skipped when --rescan is set:
-	// a full re-verification must hit the network to detect ref movement.
-	// --accept-moved and --relock both imply --rescan (must detect what
-	// moved before re-pinning).
-	if opts.acceptMoved || opts.relock {
-		opts.rescan = true
-	}
-	trustLockfileCaches := !opts.rescan
-	if trustLockfileCaches {
+	// Locked refs are sticky: resolve them from the lockfile. --accept-moved
+	// and --relock must see what moved, so they resolve everything live.
+	relock := opts.acceptMoved || opts.relock
+	if !relock && !opts.verifyFrozen {
 		r.SeedFromLockfile(store.AllDeps())
 	}
 	endSetup()
 
 	opts.workflowPaths = paths
+	if !opts.noFix {
+		release, err := store.BeginMutation(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
 
-	// Rewrite same-repo `./…` action refs to the inherently-pinned `$/…` form
-	// before scanning, so the diagnosis sees compliant refs. Runs by default on
-	// fix runs; opt out with --no-migrate-local-actions. Read-only runs
-	// (--no-fix) never touch disk.
-	if !opts.noMigrateLocalActions && !opts.noFix {
-		migrated, err := migrateLocalActions(opts.workflowPaths)
+	// Restore temporary migration edits unless Commit completes. Restoration
+	// failures remain visible in the returned error.
+	committed := false
+
+	// Migration changes runtime binding, so it requires explicit opt-in.
+	if opts.migrateLocalActions && !opts.noFix {
+		migrated, undo, err := migrateLocalActions(opts.workflowPaths)
+		defer func() {
+			if !committed {
+				if undoErr := undo(); undoErr != nil {
+					runErr = errors.Join(runErr, undoErr)
+				}
+			}
+		}()
 		if err != nil {
 			return err
 		}
@@ -269,10 +307,8 @@ func runCheck(cmd *cobra.Command, opts *checkOptions, newResolver resolverFunc) 
 
 	// Build a Lister for pin narrowing, reusing the resolver's API client; cooldown is resolved dependabot > config file > none.
 	var tagger *tag.Lister
-	var cooldownCfg tag.CooldownConfig
-	var cooldownWarnings []string
+	cooldownCfg, _, cooldownWarnings := ResolveCooldown(".")
 	if gc := r.GHClient(); gc != nil {
-		cooldownCfg, _, cooldownWarnings = ResolveCooldown(".")
 		tagger = tag.NewLister(gc, cooldownCfg)
 	}
 
@@ -281,7 +317,8 @@ func runCheck(cmd *cobra.Command, opts *checkOptions, newResolver resolverFunc) 
 		Resolver:      r,
 		Store:         store,
 		Pool:          pool,
-		Rescan:        opts.rescan,
+		Relock:        relock,
+		VerifyFrozen:  opts.verifyFrozen,
 		Profile:       prof,
 	}
 	// Defer spinner start until actual network work begins. The fast path
@@ -310,7 +347,6 @@ func runCheck(cmd *cobra.Command, opts *checkOptions, newResolver resolverFunc) 
 
 	report := result.Report
 	valid := result.Valid
-	skippedRescan := result.SkippedRescan
 
 	// Read-only modes never touch the lockfile, so surface stale entries as
 	// non-blocking info findings instead of pruning them. Fix mode reports
@@ -326,7 +362,7 @@ func runCheck(cmd *cobra.Command, opts *checkOptions, newResolver resolverFunc) 
 	onboardingRefused := 0
 	var refusedLabels []string
 	if noOnboardFlag(cmd) {
-		refusedLabels = gateNoOnboard(report)
+		refusedLabels = gateNoOnboard(report, store)
 		onboardingRefused = len(refusedLabels)
 		if onboardingRefused > 0 {
 			valid = report.IsValid()
@@ -337,6 +373,8 @@ func runCheck(cmd *cobra.Command, opts *checkOptions, newResolver resolverFunc) 
 	// they reach both read-only (--no-fix/--verify) and fix runs. Non-blocking.
 	appendCooldownConfigFindings(report, cooldownWarnings)
 
+	rl.report, rl.valid = report, valid
+
 	// Render the read-only diagnosis. --json selects the renderer; it does
 	// not decide whether fixes are applied. Terminal output is shown up front
 	// (the human narrative). JSON is emitted later, after any fixes land, so
@@ -346,7 +384,7 @@ func runCheck(cmd *cobra.Command, opts *checkOptions, newResolver resolverFunc) 
 		if showSpinner {
 			console.PauseProgress()
 		}
-		format.PresentResults(console, report, valid, true)
+		format.PresentResults(console, report, valid, !opts.noFix)
 		if showSpinner {
 			console.ResumeProgress()
 		}
@@ -357,7 +395,7 @@ func runCheck(cmd *cobra.Command, opts *checkOptions, newResolver resolverFunc) 
 	if opts.noFix {
 		console.StopProgress()
 		if opts.jsonFields != "" {
-			if err := format.WriteJSON(out, report, valid, opts.jsonFields, cliVersion(), store.File().Version, r.Hostname()); err != nil {
+			if err := format.WriteJSON(out, report, nil, valid, opts.jsonFields, cliVersion(), store.File().Version, r.Hostname()); err != nil {
 				return err
 			}
 		}
@@ -373,10 +411,18 @@ func runCheck(cmd *cobra.Command, opts *checkOptions, newResolver resolverFunc) 
 			if opts.jsonFields == "" {
 				hasFixable := format.PresentReadOnlyFailures(console, report)
 				if hasFixable {
-					console.TermDetail("Re-run without --no-fix to apply fixes.")
+					flag := "--no-fix"
+					if opts.verify {
+						flag = "--verify"
+					}
+					console.TermDetail("Re-run without %s to apply fixes.", flag)
 				}
 			}
 			return errSilent
+		}
+		if opts.jsonFields == "" {
+			n := len(report.Workflows)
+			console.TermSuccess("All %d %s valid", n, ui.Pluralize(n, "workflow", "workflows"))
 		}
 		return nil
 	}
@@ -400,43 +446,67 @@ func runCheck(cmd *cobra.Command, opts *checkOptions, newResolver resolverFunc) 
 		Pool:        pool,
 		RepoOwner:   repoOwner,
 		RepoName:    repoName,
-		Version:     cliVersion(),
 		NoNarrow:    opts.noNarrow,
 		AcceptMoved: opts.acceptMoved,
 		Relock:      opts.relock,
 		PartialScan: !fullScan,
 	})
 	endPlan()
+	rl.record = record
 	if planErr == nil && len(record.Unresolved()) > 0 {
 		planErr = fmt.Errorf("cannot write an incomplete lockfile: %d unresolved dependencies", len(record.Unresolved()))
 	}
 	if planErr != nil {
 		console.StopProgress()
 		if opts.jsonFields != "" {
-			if err := format.WriteJSON(out, report, false, opts.jsonFields, cliVersion(), store.File().Version, r.Hostname()); err != nil {
+			if err := format.WriteJSON(out, report, record, false, opts.jsonFields, cliVersion(), store.File().Version, r.Hostname()); err != nil {
 				return err
 			}
 		}
 		if len(record.Unresolved()) > 0 {
-			record.Repo = &pin.RepoInfo{Owner: repoOwner, Name: repoName, Host: r.Hostname()}
 			if opts.jsonFields == "" {
 				renderUnresolvedWarnings(console, record.Unresolved())
-			}
-			if path, err := record.WriteJSON(); err == nil && opts.jsonFields == "" {
-				console.TermDetail("Resolution record: %s", path)
 			}
 			return errSilent
 		}
 		return fmt.Errorf("planning pins: %w", planErr)
 	}
 
-	// Commit: write all changes to disk atomically (fast local I/O, no
-	// spinner label — it finishes before the user could read one).
+	// All or nothing: a run with errors it cannot fix writes nothing.
+	if runHasBlockingErrors(report, record, opts.acceptMoved) {
+		console.StopProgress()
+		if opts.jsonFields != "" {
+			if err := format.WriteJSON(out, report, record, false, opts.jsonFields, cliVersion(), store.File().Version, r.Hostname()); err != nil {
+				return err
+			}
+			return errSilent
+		}
+		if investigated := record.Investigated(); len(investigated) > 0 {
+			renderInvestigationAlerts(console, investigated, r)
+		}
+		format.PresentReadOnlyFailures(console, report)
+		console.TermBlank()
+		console.TermError("Nothing was written: fix the errors above and re-run")
+		return errSilent
+	}
+
+	if err := validateCooldownCandidates(ctx, record, store, r.GHClient(), cooldownCfg); err != nil {
+		console.StopProgress()
+		if opts.jsonFields != "" {
+			if outputErr := format.WriteJSON(out, report, record, false, opts.jsonFields, cliVersion(), store.File().Version, r.Hostname()); outputErr != nil {
+				return outputErr
+			}
+		}
+		return err
+	}
+
+	// Commit stages and validates all candidates before writing.
 	endCommit := prof.Phase("pin.Commit (disk writes)")
-	if err := pin.Commit(ctx, record, store, &pin.CommitOptions{SkipNewWorkflowEntries: noOnboardFlag(cmd)}); err != nil {
+	if err := pin.Commit(ctx, record, store, &pin.CommitOptions{SkipNewWorkflowEntries: noOnboardFlag(cmd), MutationHeld: true}); err != nil {
 		console.StopProgress()
 		return fmt.Errorf("committing pins: %w", err)
 	}
+	committed = true
 	endCommit()
 
 	console.StopProgress()
@@ -461,46 +531,15 @@ func runCheck(cmd *cobra.Command, opts *checkOptions, newResolver resolverFunc) 
 		injectFreshTagFindings(ctx, report, record, tagger, cooldownCfg)
 	}
 
-	// Write the run log.
-	record.Repo = &pin.RepoInfo{Owner: repoOwner, Name: repoName, Host: resolveHostname(opts.hostname)}
-	if path, werr := record.WriteJSON(); werr == nil && opts.jsonFields == "" {
-		defer func() {
-			console.TermBlank()
-			console.TermDetail("Resolution record: %s", path)
-		}()
-	}
-
 	// JSON mode emits the (pre-fix) diagnosis now — after the commit
 	// succeeded — so machine consumers never see findings for a run that
-	// then failed to write. Exit code mirrors the terminal autofix path: a
-	// non-zero exit only when findings remain that can't be auto-fixed
-	// (lockfile forgery).
+	// then failed to write.
 	if opts.jsonFields != "" {
-		if err := format.WriteJSON(out, report, valid, opts.jsonFields, cliVersion(), store.File().Version, r.Hostname()); err != nil {
-			return err
-		}
-		if reportHasUnfixableErrors(report, opts.acceptMoved) || len(record.Investigated()) > 0 {
-			return errSilent
-		}
-		return nil
+		return format.WriteJSON(out, report, record, valid, opts.jsonFields, cliVersion(), store.File().Version, r.Hostname())
 	}
 
 	// Terminal summary.
-	hasInconclusive := opts.rescan && report.HasInconclusive()
-	summaryErr := renderPinSummary(ctx, console, record, report, r, skippedRescan, hasInconclusive, refusedLabels, opts.noNarrow, opts.acceptMoved, store.OriginalVersion(), staleWorkflows)
-
-	if summaryErr != nil {
-		return summaryErr
-	}
-
-	// --rescan strict gate: inconclusive reachability is a hard failure when
-	// the user explicitly requested a full re-verification. Without this,
-	// inconclusive findings (e.g. SAML-blocked branch listing) silently pass
-	// and the "✓ All N workflows valid" message is misleading.
-	if hasInconclusive {
-		return errSilent
-	}
-	return nil
+	return renderPinSummary(ctx, console, record, report, r, refusedLabels, opts.noNarrow, opts.acceptMoved, store.OriginalVersion(), staleWorkflows)
 }
 
 // injectVersionRefFindings appends info-severity findings for entries pinned
@@ -597,39 +636,75 @@ func cliVersion() string {
 	return "unknown"
 }
 
-// migrateLocalActions rewrites same-repo `./…` action refs to `$/…` and writes
-// changes to disk. It covers two kinds of files: the discovered workflow files,
-// and every in-repo composite action definition file (action.yml/action.yaml)
-// found under the repository root. The latter is why a composite action that
-// internally uses `uses: ./helper` gets fixed too, not just the workflow that
-// calls it. Returns the total number of `uses:` lines rewritten.
-func migrateLocalActions(paths []string) (int, error) {
+// migrateLocalActions rewrites selected workflows and their reachable local
+// workflow and action sources. The undo function restores contents and modes.
+func migrateLocalActions(paths []string) (int, func() error, error) {
+	var written []plannedMigration
+	undo := func() error {
+		var undoErr error
+		for i := len(written) - 1; i >= 0; i-- {
+			m := written[i]
+			if err := os.WriteFile(m.path, m.original, m.mode); err != nil {
+				undoErr = errors.Join(undoErr, fmt.Errorf("restoring %s: %w", m.path, err))
+			}
+		}
+		return undoErr
+	}
 	files := append([]string(nil), paths...)
 
-	// Also sweep in-repo composite action files. The repo root is derived from
-	// a workflow path (they live under .github/workflows/); onboarding only
-	// runs when workflows exist, so an empty paths list means nothing to do.
-	if len(paths) > 0 {
-		if root := workflowfile.FindRepoRoot(paths[0]); root != "" {
-			actionFiles, err := workflowfile.DiscoverCompositeActionFiles(root)
-			if err != nil {
-				return 0, err
+	// Follow selected sources through local workflows and same-repository actions.
+	seenSources := map[string]bool{}
+	for i := 0; i < len(files); i++ {
+		path := files[i]
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			return 0, undo, err
+		}
+		if seenSources[absPath] {
+			continue
+		}
+		seenSources[absPath] = true
+		wf, err := workflowfile.Load(path)
+		if err != nil {
+			return 0, undo, err
+		}
+		scan := wf.ExtractActionRefs()
+		refs := append([]string(nil), scan.SelfRepositoryActionRefs...)
+		for _, local := range scan.LocalPaths {
+			refs = append(refs, "$/"+strings.TrimPrefix(local, "./"))
+		}
+		if root := workflowfile.FindRepoRoot(path); root != "" {
+			workflowScan := workflowfile.ScanSelfRepositoryActions(path, nil, scan.LocalWorkflowRefs...)
+			if len(workflowScan.Errors) > 0 {
+				return 0, undo, fmt.Errorf("refusing to migrate local reusable workflows in %s: %s", path, workflowScan.Errors[0])
 			}
-			files = append(files, actionFiles...)
+			files = append(files, workflowScan.ActionFiles...)
+			for _, ref := range refs {
+				actionDir := filepath.Join(root, strings.TrimPrefix(ref, "$/"))
+				for _, name := range []string{"action.yml", "action.yaml"} {
+					candidate := filepath.Join(actionDir, name)
+					if _, err := os.Stat(candidate); err != nil {
+						if os.IsNotExist(err) {
+							continue
+						}
+						return 0, undo, err
+					}
+					if err := workflowfile.ValidatePathWithinRoot(root, candidate); err != nil {
+						return 0, undo, fmt.Errorf("refusing to migrate %s: %w", candidate, err)
+					}
+					files = append(files, candidate)
+					break
+				}
+			}
 		}
 	}
 
-	type plannedMigration struct {
-		path    string
-		content []byte
-		changed int
-	}
 	var migrations []plannedMigration
 	seen := make(map[string]bool)
 	for _, path := range files {
 		absPath, err := filepath.Abs(path)
 		if err != nil {
-			return 0, fmt.Errorf("resolving migration path %s: %w", path, err)
+			return 0, undo, fmt.Errorf("resolving migration path %s: %w", path, err)
 		}
 		if seen[absPath] {
 			continue
@@ -638,31 +713,48 @@ func migrateLocalActions(paths []string) (int, error) {
 
 		if root := workflowfile.FindRepoRoot(path); root != "" {
 			if err := workflowfile.ValidatePathWithinRoot(root, path); err != nil {
-				return 0, fmt.Errorf("refusing to migrate %s: %w", path, err)
+				return 0, undo, fmt.Errorf("refusing to migrate %s: %w", path, err)
 			}
+		}
+		original, err := os.ReadFile(path)
+		if err != nil {
+			return 0, undo, fmt.Errorf("loading %s: %w", path, err)
 		}
 		wf, err := workflowfile.Load(path)
 		if err != nil {
-			return 0, fmt.Errorf("loading %s: %w", path, err)
+			return 0, undo, fmt.Errorf("loading %s: %w", path, err)
 		}
 		content, changed, err := wf.MigrateLocalActionsToSelfRepository()
 		if err != nil {
-			return 0, fmt.Errorf("refusing to migrate %s: %w", path, err)
+			return 0, undo, fmt.Errorf("refusing to migrate %s: %w", path, err)
 		}
 		if changed == 0 {
 			continue
 		}
-		migrations = append(migrations, plannedMigration{path: path, content: content, changed: changed})
+		info, err := os.Stat(path)
+		if err != nil {
+			return 0, undo, err
+		}
+		migrations = append(migrations, plannedMigration{path: path, original: original, content: content, changed: changed, mode: info.Mode().Perm()})
 	}
 
 	// Do not write anything until every candidate has passed structural and
 	// repository-boundary validation.
-	written := 0
+	total := 0
 	for _, plan := range migrations {
-		if err := os.WriteFile(plan.path, plan.content, 0o644); err != nil {
-			return written, fmt.Errorf("writing %s: %w", plan.path, err)
+		written = append(written, plan)
+		if err := os.WriteFile(plan.path, plan.content, plan.mode); err != nil {
+			return total, undo, fmt.Errorf("writing %s: %w", plan.path, err)
 		}
-		written += plan.changed
+		total += plan.changed
 	}
-	return written, nil
+	return total, undo, nil
+}
+
+type plannedMigration struct {
+	path     string
+	original []byte
+	content  []byte
+	changed  int
+	mode     os.FileMode
 }

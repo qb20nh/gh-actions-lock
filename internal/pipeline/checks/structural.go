@@ -8,10 +8,9 @@ import (
 	"github.com/github/gh-actions-lock/internal/dep"
 )
 
-// checkNotPinned emits NotPinned for any uses: ref that has no
-// matching lockfile entry. SHA-shaped refs are reported under their own
-// category. When the lockfile has an entry for the same action at a
-// different ref, RefChanged wins.
+// checkNotPinned reports missing coverage independently of the symbolic-ref
+// advisory. For symbolic refs, RefChanged takes precedence when another ref
+// of the same repository is recorded.
 func checkNotPinned(pw ParsedWorkflow, depPins []lockedPin, depIndex map[string]lockedPin) []Finding {
 	if len(pw.Refs) == 0 {
 		return nil
@@ -22,13 +21,21 @@ func checkNotPinned(pw ParsedWorkflow, depPins []lockedPin, depIndex map[string]
 	}
 	var out []Finding
 	for _, ref := range pw.Refs {
-		if parserlock.IsFullSha(ref.Ref) {
-			continue
-		}
 		if _, ok := depIndex[parserlock.IndexKey(ref.Owner, ref.Repo, ref.Ref)]; ok {
 			continue
 		}
-		if knownAction[nwoLower(ref.Owner, ref.Repo)] {
+		if parserlock.IsFullSha(ref.Ref) {
+			covered := false
+			for _, pin := range depPins {
+				if pin.NWO == nwoLower(ref.Owner, ref.Repo) && strings.EqualFold(pin.SHA(), ref.Ref) {
+					covered = true
+					break
+				}
+			}
+			if covered {
+				continue
+			}
+		} else if knownAction[nwoLower(ref.Owner, ref.Repo)] {
 			continue
 		}
 		f := newRefFinding(pw, ref, NotPinned, SeverityError, ConfidenceHigh)

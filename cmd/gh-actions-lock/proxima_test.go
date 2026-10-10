@@ -61,7 +61,7 @@ func proximaFixture(t *testing.T, publicStatus int) http.RoundTripper {
 			return httpmock.JSONResponse(map[string]any{"data": map[string]any{
 				"a0": testRepoResponse("tenant/internal", tenantSHA, composite),
 			}})(req)
-		case !tenant && path == "/repos/actions/public/commits/v2":
+		case !tenant && (path == "/repos/actions/public/commits/v2" || path == "/repos/actions/public/commits/"+publicSHA):
 			return httpmock.JSONResponse(map[string]any{"sha": publicSHA})(req)
 		case !tenant && path == "/repos/actions/public/contents/action.yml":
 			assert.Equal(t, publicSHA, req.URL.Query().Get("ref"))
@@ -115,7 +115,7 @@ jobs:
 		return base.RoundTrip(req)
 	})
 	_, _, err = runCommandWithHTTP(t, pinnedTransport,
-		"--hostname", "tenant.ghe.com", "--rescan", "--no-fix", "--json", path)
+		"--hostname", "tenant.ghe.com", "--verify", "--json", path)
 	require.NoError(t, err)
 	assert.Equal(t, raw, readTempLockfilePins(t))
 
@@ -126,6 +126,66 @@ jobs:
 	_, _, err = runCommandWithHTTP(t, proximaFixture(t, 200), args...)
 	require.NoError(t, err)
 	assert.Equal(t, raw, readTempLockfilePins(t))
+}
+
+func TestProximaRecordedRenameRewritesOnOriginalHost(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		hostname string
+	}{
+		{name: "omitted home host", hostname: "tenant.ghe.com"},
+		{name: "explicit public fallback", hostname: "github.com"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeTempWorkflow(t, strings.Replace(transferWorkflow, "@v2.2.2", "@main", 1),
+				"krzema12/github-actions-typing@main=sha1-"+parityTestSHA)
+			if tt.hostname == "github.com" {
+				raw := strings.Replace(readTempLockfilePins(t), "    ref: 'main'", "    hostname: 'github.com'\n    ref: 'main'", 1)
+				require.NoError(t, os.WriteFile(parserlock.Path, []byte(raw), 0o600))
+			}
+			reg := &httpmock.Registry{}
+			defer reg.Verify(t)
+			for _, owner := range []string{"krzema12", "typesafegithub"} {
+				reg.Register(httpmock.REST("GET", `^/repos/`+owner+`/github-actions-typing$`), httpmock.JSONResponse(map[string]any{
+					"full_name": "typesafegithub/github-actions-typing", "visibility": "public", "id": 1, "owner": map[string]any{"id": 42},
+				}))
+			}
+			if tt.hostname == "github.com" {
+				reg.Register(httpmock.REST("GET", `^/repos/krzema12/github-actions-typing/commits/`+parityTestSHA+`$`),
+					httpmock.JSONResponse(map[string]any{"sha": parityTestSHA}))
+			} else {
+				reg.Register(httpmock.GraphQL(`commit: object\(oid`), transferParity(1))
+			}
+			transport := proximaTransport(func(req *http.Request) (*http.Response, error) {
+				if tt.hostname == "github.com" && req.URL.Host == "api.tenant.ghe.com" && req.URL.Path == "/repos/typesafegithub/github-actions-typing" {
+					return httpmock.StatusResponse(http.StatusNotFound)(req)
+				}
+				assert.Equal(t, "api."+tt.hostname, req.URL.Host)
+				return reg.RoundTrip(req)
+			})
+
+			_, stderr, err := runCommandWithHTTP(t, transport,
+				"--hostname", "tenant.ghe.com", "--no-narrow", "--no-migrate-local-actions", path)
+			require.NoError(t, err, stderr)
+			wf, err := os.ReadFile(path)
+			require.NoError(t, err)
+			assert.Contains(t, string(wf), "uses: typesafegithub/github-actions-typing@main")
+			assert.NotContains(t, string(wf), "krzema12")
+			file, err := parserlock.Parse([]byte(readTempLockfilePins(t)))
+			require.NoError(t, err)
+			require.Len(t, file.Dependencies, 1)
+			pin, ok := file.Dependencies["typesafegithub/github-actions-typing@main"]
+			require.True(t, ok, "lock key must follow the renamed uses")
+			assert.Equal(t, "sha1-"+parityTestSHA, pin.Commit)
+			assert.EqualValues(t, 1, pin.RepoID)
+			if tt.hostname == "github.com" {
+				assert.Equal(t, "github.com", pin.Hostname)
+			} else {
+				assert.Empty(t, pin.Hostname)
+			}
+			assert.Equal(t, []string{"typesafegithub/github-actions-typing@main"}, file.Workflows[path])
+		})
+	}
 }
 
 func TestProximaOmittedPinsCannotMoveToDotcomOrTenantNamesakes(t *testing.T) {

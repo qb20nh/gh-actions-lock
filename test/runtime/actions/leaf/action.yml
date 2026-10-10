@@ -1,0 +1,37 @@
+name: Runtime smoke leaf
+description: Reports a source marker and the nested action definition path.
+
+inputs:
+  expected-marker:
+    description: Marker expected from the action definition being executed.
+    required: false
+    default: gh-actions-lock-runtime-leaf-v1
+
+outputs:
+  marker:
+    description: Marker embedded in this action definition.
+    value: ${{ steps.identity.outputs.marker }}
+  source-path:
+    description: Path of the action definition supplied by the runner.
+    value: ${{ steps.identity.outputs.source-path }}
+
+runs:
+  using: composite
+  steps:
+    - id: identity
+      shell: bash
+      env:
+        EXPECTED_MARKER: ${{ inputs.expected-marker }}
+        DEFINITION_PATH: ${{ github.action_path }}
+      run: |
+        marker=gh-actions-lock-runtime-leaf-v1
+        if [ "$EXPECTED_MARKER" != "$marker" ]; then
+          printf 'Unexpected runtime leaf marker: %s\n' "$marker" >&2
+          exit 1
+        fi
+        if [ -z "$DEFINITION_PATH" ]; then
+          printf 'Runner did not supply the action definition path\n' >&2
+          exit 1
+        fi
+        printf 'marker=%s\nsource-path=%s\n' "$marker" "$DEFINITION_PATH" >> "$GITHUB_OUTPUT"
+        printf 'RUNTIME_LEAF_MARKER=%s\nRUNTIME_LEAF_PATH=%s\n' "$marker" "$DEFINITION_PATH"
