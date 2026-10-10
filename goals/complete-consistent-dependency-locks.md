@@ -4,10 +4,10 @@ Deliver reviewable fixes so verification reports dependency coverage accurately,
 
 - **Repository:** [github/gh-actions-lock](https://github.com/github/gh-actions-lock)
 - **Assessment baseline:** `3f7c302310dde7556291a2ce0792de36ec41a4c8`
-- **Status:** CLI implementation, hosted checks, draft release, and positive runtime probes pass. M6 is blocked on upstream #125's runtime rejection of malformed YAML locks; uploaded-binary verification is in progress.
+- **Status:** CLI implementation, hosted checks, draft release, uploaded-binary verification, and positive runtime probes pass. M6 is blocked on upstream #125's runtime rejection of malformed YAML locks.
 - **Progress:** 5 of 6 milestones complete.
 - **Last validated:** 2026-10-10.
-- **Delivery:** [Isolated implementation branch](https://github.com/qb20nh/gh-actions-lock/tree/codex/m6-implementation-20261010), including the upstream PR stack, and an attested draft prerelease. Upstream merge remains separate.
+- **Delivery:** [Isolated implementation branch](https://github.com/qb20nh/gh-actions-lock/tree/codex/m6-implementation-20261010), [published evidence branch](https://github.com/qb20nh/gh-actions-lock/tree/codex/m6/evidence-20261010), and an attested draft prerelease. Upstream merge remains separate.
 - **Execution order:** M1 → M2 → M3 → M4 → M5 → M6.
 
 ## Milestones
@@ -82,7 +82,7 @@ Deliver reviewable fixes so verification reports dependency coverage accurately,
 
   **Completed locally:** Required formatting, vet, release-script checks, full race suite, and stub integration pass. [README](../README.md) documents verification limits, migration semantics, cooldown provenance, planned/applied outcomes, and filesystem failure guarantees.
 
-  **GitHub validation:** [Required checks and release build](https://github.com/qb20nh/gh-actions-lock/actions/runs/38056832635) pass at commit `34c65ecf262f580f066bf1d105a2ecc310226374`. The [validation workflow](../.github/workflows/m6-validation.yml) produced an [attested draft prerelease](https://github.com/qb20nh/gh-actions-lock/releases/tag/untagged-f25714a2bdfe7271be1e) with 12 platform binaries; its annotated tag resolves to that tested commit. The [release asset workflow](../.github/workflows/m6-release-smoke.yml) separately checks the uploaded Linux binary's digest, attestation, source commit, and offline workflow coverage.
+  **GitHub validation:** [Required checks and release build](https://github.com/qb20nh/gh-actions-lock/actions/runs/38056832635) pass at commit `34c65ecf262f580f066bf1d105a2ecc310226374`. The [validation workflow](../.github/workflows/m6-validation.yml) produced an [attested draft prerelease](https://github.com/qb20nh/gh-actions-lock/releases/tag/untagged-f25714a2bdfe7271be1e) with 12 platform binaries; its annotated tag resolves to that tested commit. The [release asset workflow](../.github/workflows/m6-release-smoke.yml) [passed](https://github.com/qb20nh/gh-actions-lock/actions/runs/38057728082) verification of the uploaded Linux binary's digest, hosted build attestation, exact source commit, execution, and offline workflow coverage. Draft notes now include the runtime results and remaining blocker.
 
   **Runtime validation:** The [runtime workflow](../.github/workflows/m6-runtime.yml) [passed](https://github.com/qb20nh/gh-actions-lock/actions/runs/38056833390) same-repository actions, foreign actions, nested foreign reusable workflows with a poisoned caller checkout, and a symbolic ref whose live marker differs from its recorded pin. The hosted runner was `2.337.0`, Ubuntu `24.04.5`, image `20261004.327.1`. Marker and source-path assertions establish binding to the defining repository. The divergent-ref job announces locked versions and downloads the recorded `38a3e6d` commit despite the branch pointing to `7e72f65`.
 
