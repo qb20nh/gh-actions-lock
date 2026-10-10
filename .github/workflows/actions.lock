@@ -6,6 +6,8 @@ workflows:
     '.github/workflows/dependency-review.yml':
         - 'actions/checkout@v5.0.1'
         - 'actions/dependency-review-action@v5.0.0'
+    '.github/workflows/m6-release-smoke.yml':
+        - 'actions/checkout@v6.0.2'
     '.github/workflows/m6-runtime.yml':
         - 'actions/checkout@v6.0.2'
         - 'qb20nh/transition-test@38a3e6df964dfe1756abb8dec154228d7140a841'

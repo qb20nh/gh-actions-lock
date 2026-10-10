@@ -4,10 +4,10 @@ Deliver reviewable fixes so verification reports dependency coverage accurately,
 
 - **Repository:** [github/gh-actions-lock](https://github.com/github/gh-actions-lock)
 - **Assessment baseline:** `3f7c302310dde7556291a2ce0792de36ec41a4c8`
-- **Status:** CLI implementation and required checks complete; M6 GitHub workflow/release validation in progress.
+- **Status:** CLI implementation, hosted checks, draft release, and positive runtime probes pass. M6 is blocked on upstream #125's runtime rejection of malformed YAML locks; uploaded-binary verification is in progress.
 - **Progress:** 5 of 6 milestones complete.
 - **Last validated:** 2026-10-10.
-- **Delivery:** Local implementation, including the upstream PR stack; isolated fork validation is being prepared. Upstream merge remains separate.
+- **Delivery:** [Isolated implementation branch](https://github.com/qb20nh/gh-actions-lock/tree/codex/m6-implementation-20261010), including the upstream PR stack, and an attested draft prerelease. Upstream merge remains separate.
 - **Execution order:** M1 → M2 → M3 → M4 → M5 → M6.
 
 ## Milestones
@@ -82,16 +82,18 @@ Deliver reviewable fixes so verification reports dependency coverage accurately,
 
   **Completed locally:** Required formatting, vet, release-script checks, full race suite, and stub integration pass. [README](../README.md) documents verification limits, migration semantics, cooldown provenance, planned/applied outcomes, and filesystem failure guarantees.
 
-  **GitHub continuation:** [M6 validation workflow](../.github/workflows/m6-validation.yml) runs required checks on isolated `codex/m6-*` fork branches, then builds an attested draft prerelease at the tested commit. [Runtime workflow](../.github/workflows/m6-runtime.yml) exercises same-repository actions, a foreign provider action, nested foreign reusable workflows with a poisoned caller checkout, and a symbolic ref whose live marker differs from its recorded pin. Both new workflows pass local YAML/shell checks and offline lock coverage.
+  **GitHub validation:** [Required checks and release build](https://github.com/qb20nh/gh-actions-lock/actions/runs/38056832635) pass at commit `34c65ecf262f580f066bf1d105a2ecc310226374`. The [validation workflow](../.github/workflows/m6-validation.yml) produced an [attested draft prerelease](https://github.com/qb20nh/gh-actions-lock/releases/tag/untagged-f25714a2bdfe7271be1e) with 12 platform binaries; its annotated tag resolves to that tested commit. The [release asset workflow](../.github/workflows/m6-release-smoke.yml) separately checks the uploaded Linux binary's digest, attestation, source commit, and offline workflow coverage.
+
+  **Runtime validation:** The [runtime workflow](../.github/workflows/m6-runtime.yml) [passed](https://github.com/qb20nh/gh-actions-lock/actions/runs/38056833390) same-repository actions, foreign actions, nested foreign reusable workflows with a poisoned caller checkout, and a symbolic ref whose live marker differs from its recorded pin. The hosted runner was `2.337.0`, Ubuntu `24.04.5`, image `20261004.327.1`. Marker and source-path assertions establish binding to the defining repository. The divergent-ref job announces locked versions and downloads the recorded `38a3e6d` commit despite the branch pointing to `7e72f65`.
 
   **Provider:** An isolated [fixture branch](https://github.com/qb20nh/transition-test/tree/codex/m6-gh-actions-lock-fixtures-20261010) records marker `v1` at [38a3e6d](https://github.com/qb20nh/transition-test/commit/38a3e6df964dfe1756abb8dec154228d7140a841); its live ref advances to marker `v2` at [7e72f65](https://github.com/qb20nh/transition-test/commit/7e72f651cfb3ae0aba09f652b96b1efda2454d5b). The caller lock retains `v1` for the divergent-ref test. Default branches are outside this test's mutation scope.
 
-  **Remaining release gate:** [Runner v2.338.0](https://github.com/actions/runner/releases/tag/v2.338.0) includes the [manifest parser fix](https://github.com/actions/runner/pull/4669). Hosted rollout is progressive, and the deployed service must also supply `actions_self_repository` and lock dependency payloads. Collect actual runner versions, workflow URLs, action-download SHAs, and marker/source-path assertions. Confirm committed malformed locks produce lock-specific rejection before a sentinel executes. CLI coverage is verified; deployed support remains unverified until those results exist.
+  **Remaining release gate:** A [committed syntactically malformed lock](https://github.com/qb20nh/gh-actions-lock/actions/runs/38056912627) was ignored, and `M6_LOCK_SENTINEL_EXECUTED` ran. This reproduces #125 and keeps M6 open. A [dangling-edge lock](https://github.com/qb20nh/gh-actions-lock/actions/runs/38056929771) was rejected at startup with an explicit `Invalid lockfile` annotation and no jobs. Re-run the syntax-negative control after the upstream service fix; completion requires a lock-specific rejection before the sentinel executes. [Recorded evidence](../test/runtime/evidence/2026-10-10.md) links all commits, runs, and assertions.
 
   | Upstream reference | Effect on release scope | Completion evidence |
   | --- | --- | --- |
-  | [#125 — malformed lock ignored at runtime](https://github.com/github/gh-actions-lock/issues/125) | CLI validation is strict, but runtime enforcement remains an upstream dependency. | Deployed service/runner rejects malformed locks before executing actions; attach a reproducible run. |
-  | [#126 — cross-repository `$/` execution failure](https://github.com/github/gh-actions-lock/issues/126) | Keep migration opt-in and do not advertise deployed cross-repository support. | Same- and cross-repository smoke runs succeed at the defining commit, with runner/service versions recorded. |
+  | [#125 — malformed lock ignored at runtime](https://github.com/github/gh-actions-lock/issues/125) | Reproduced on the hosted service. Strict CLI validation passes, but M6 remains blocked on runtime YAML rejection. | Re-run the committed syntax-negative control after the upstream fix; require an explicit lock error and no sentinel execution. |
+  | [#126 — cross-repository `$/` execution failure](https://github.com/github/gh-actions-lock/issues/126) | Positive probes pass on the recorded deployment; migration remains opt-in because workspace semantics can differ. | Met for this deployment: same/foreign actions and nested reusable workflows bind to the defining commit on hosted runner `2.337.0`. |
   | [#128 — generated local Docker action](https://github.com/github/gh-actions-lock/issues/128), [pypa #425](https://github.com/pypa/gh-action-pypi-publish/issues/425) | Generated workspace actions remain incomplete coverage and cannot be onboarded as complete locks. | Upstream exposes deterministic dependency metadata or defines a supported generated-action model; add discovery and coverage regressions before changing support claims. |
 
 ## Validation baseline
@@ -112,7 +114,7 @@ All checks below passed after the final CLI changes:
 | `git diff --check` and `git diff --cached --check` | Pass. | No whitespace errors. |
 | `make test-stub` | 34 passed, 0 failed. | [Stub integration log](/workspace/.cloud-setup/gh-actions-lock/goal-final-stub.log) |
 
-Runner/service smoke validation was not performed. M6 remains open for that evidence; no required CLI test failure remains.
+Hosted required checks and runtime smoke results are recorded in the [M6 evidence report](../test/runtime/evidence/2026-10-10.md). M6 remains open because the service ignored a syntactically malformed lock; no required CLI test failure remains.
 
 ## Completion and follow-ups
 

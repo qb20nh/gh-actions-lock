@@ -172,8 +172,12 @@ Without this flag, `./…` action references remain unchanged.
 `--no-migrate-local-actions` is also accepted. Local reusable workflow calls are
 discovered without converting them to `$/…`.
 
-End-to-end runner and Actions service validation of `$/…` support is still
-pending. CLI acceptance alone does not establish runtime support.
+[Recorded GitHub smoke tests](./test/runtime/evidence/2026-10-10.md) passed
+same-repository and cross-repository `$/…` calls, including nested reusable
+workflows, on the tested hosted runner/service deployment. Support depends on
+the deployed service and runner configuration. The same tests found that a
+syntactically malformed lock could be ignored at runtime; strict rejection
+remains tracked in [#125](https://github.com/github/gh-actions-lock/issues/125).
 
 ## How it works
 
