@@ -179,6 +179,13 @@ the deployed service and runner configuration. The same tests found that a
 syntactically malformed lock could be ignored at runtime; strict rejection
 remains tracked in [#125](https://github.com/github/gh-actions-lock/issues/125).
 
+A [tested workaround](./test/runtime/evidence/2026-10-10-workarounds.md) puts
+trusted offline verification in a separate job with no actions, container, or
+services, and makes consumers depend on its success. A malformed lock then
+blocks those consumers. Validation inside a consumer's first step starts after
+action preparation. Full-SHA references provide additional protection, but a
+pinned parent can still declare mutable remote children.
+
 ## How it works
 
 A repo gets a lockfile at [`.github/workflows/actions.lock`](https://github.com/github/gh-actions-lock/blob/main/.github/workflows/actions.lock), and workflows are onboarded individually.

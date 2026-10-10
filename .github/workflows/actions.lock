@@ -16,6 +16,9 @@ workflows:
         - 'actions/checkout@v6.0.2'
         - 'actions/setup-go@v6.4.0'
         - 'cli/gh-extension-precompile@v2.1.0'
+    '.github/workflows/m6-workarounds.yml':
+        - 'qb20nh/transition-test@38a3e6df964dfe1756abb8dec154228d7140a841'
+        - 'qb20nh/transition-test@93652f3e19efae7f268e56fc64dc774af069a02e'
     '.github/workflows/release.yml':
         - 'actions/checkout@v6.0.2'
         - 'cli/gh-extension-precompile@v2.1.0'
@@ -81,6 +84,13 @@ dependencies:
         repo_id: 579148082
         uses:
             - 'actions/checkout@v6.0.2'
+    'qb20nh/transition-test@93652f3e19efae7f268e56fc64dc774af069a02e':
+        ref: '93652f3e19efae7f268e56fc64dc774af069a02e'
+        commit: 'sha1-93652f3e19efae7f268e56fc64dc774af069a02e'
+        owner_id: 1734074
+        repo_id: 579148082
+        uses:
+            - 'qb20nh/transition-test@codex/m6-gh-actions-lock-fixtures-20261010'
     'qb20nh/transition-test@codex/m6-gh-actions-lock-fixtures-20261010':
         ref: 'codex/m6-gh-actions-lock-fixtures-20261010'
         commit: 'sha1-38a3e6df964dfe1756abb8dec154228d7140a841'
