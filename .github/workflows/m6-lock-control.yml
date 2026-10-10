@@ -1,0 +1,16 @@
+name: M6 committed lock control
+on:
+  push:
+    branches:
+      - codex/m6-lock-*
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sentinel after service lock validation
+        run: echo M6_LOCK_SENTINEL_EXECUTED
+      - uses: actions/checkout@v6.0.2
+        with:
+          persist-credentials: false
