@@ -14,7 +14,6 @@ import (
 	"github.com/github/gh-actions-lock/internal/pinpool"
 	"github.com/github/gh-actions-lock/internal/pipeline/checks"
 	"github.com/github/gh-actions-lock/internal/resolve"
-	"github.com/github/gh-actions-lock/internal/workflowfile"
 )
 
 // DiagnoseParsed runs engine diagnostics for each pre-parsed workflow, assuming
@@ -98,6 +97,17 @@ func diagnoseOneParsed(ctx context.Context, pw checks.ParsedWorkflow, r *resolve
 					Confidence:   checks.ConfidenceHigh,
 					Detail:       detail,
 					Remediation:  "drop the `@ref` suffix — `$/…` always resolves to the running ref",
+				})
+				blockingResolverError = true
+			}
+			if resolve.IsInvalidMetadata(resolveErr) || resolve.IsConflictingRef(resolveErr) {
+				wr.Findings = append(wr.Findings, checks.Finding{
+					WorkflowPath: pw.Path,
+					Category:     checks.NotPinned,
+					Severity:     checks.SeverityError,
+					Confidence:   checks.ConfidenceHigh,
+					Detail:       fmt.Sprintf("dependency discovery is incomplete: %s", resolveErr),
+					Remediation:  "fix the referenced dependency metadata before updating the lockfile",
 				})
 				blockingResolverError = true
 			}
@@ -209,6 +219,8 @@ func precheckWorkflow(pw checks.ParsedWorkflow, store *lockfile.State) (checks.W
 	if wr.RewriteRefs == nil {
 		wr.RewriteRefs = pw.Refs
 	}
+	wr.SourceContents = pw.SourceContents
+	wr.SourcePaths = pw.SourcePaths
 	wr.SelfActionFiles = pw.SelfActionFiles
 	wr.SelfActionRefs = pw.SelfActionRefs
 	wr.ParseWarnings = pw.ParseWarnings
@@ -239,30 +251,22 @@ func precheckWorkflow(pw checks.ParsedWorkflow, store *lockfile.State) (checks.W
 	}
 
 	if len(pw.LocalPaths) > 0 {
-		wfKey := workflowfile.KeyFromPath(pw.Path)
-		if store != nil && store.HasWorkflow(wfKey) {
-			wr.Findings = append(wr.Findings, checks.Finding{
-				WorkflowPath: pw.Path,
-				Category:     checks.LocalAction,
-				Severity:     checks.SeverityError,
-				Confidence:   checks.ConfidenceHigh,
-				Detail:       "workflow uses local path actions which are not supported; remove local path actions to continue using the lockfile",
-				Remediation:  "rewrite same-repo `uses: ./…` to `uses: $/…` (automatic on fix runs; disable with --no-migrate-local-actions), or remove the `./…` steps",
-			})
-		} else {
-			wr.Findings = append(wr.Findings, checks.Finding{
-				WorkflowPath: pw.Path,
-				Category:     checks.LocalAction,
-				Severity:     checks.SeverityWarning,
-				Confidence:   checks.ConfidenceHigh,
-				Detail:       "workflow uses local path actions; lockfile onboarding is not supported",
-				Remediation:  "rewrite same-repo `uses: ./…` to `uses: $/…` (automatic on fix runs; disable with --no-migrate-local-actions)",
-			})
-		}
-		hasTerminalFinding = true
+		wr.SkipCommit = true
+		wr.Findings = append(wr.Findings, checks.Finding{
+			WorkflowPath: pw.Path,
+			Category:     checks.LocalAction,
+			Severity:     checks.SeverityError,
+			Confidence:   checks.ConfidenceHigh,
+			Detail:       "workflow uses workspace-relative local actions; dependency coverage is incomplete",
+			Remediation:  "inspect checkout and generated-file behavior before opting into --migrate-local-actions, or use remote action references",
+		})
 	}
 
 	if hasTerminalFinding {
+		preserveExistingInventory(&wr, pw)
+		return wr, true
+	}
+	if len(pw.LocalPaths) > 0 && len(pw.Refs) == 0 {
 		preserveExistingInventory(&wr, pw)
 		return wr, true
 	}

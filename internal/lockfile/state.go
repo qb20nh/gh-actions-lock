@@ -40,6 +40,7 @@ type MetadataResolver interface {
 // a single store instance without external synchronization.
 type State struct {
 	mu              sync.Mutex
+	saveMu          sync.Mutex
 	lockPath        string // full path to actions.lock on disk
 	file            parserlock.File
 	originalVersion string // version string read from disk (empty if file did not exist)
@@ -47,13 +48,16 @@ type State struct {
 	idCache         map[string][2]int64
 	idSF            singleflight.Group
 	hostname        string
+	baseline        []byte
+	baselineExists  bool
+	mutationFile    *os.File
 }
 
 // ErrCorruptLockfile reports that a lockfile exists on disk but cannot be
 // parsed (malformed YAML, unknown fields, or a dependency entry missing a
 // required key). It is distinct from a missing lockfile (legitimately empty)
 // and from a future-version lockfile (ErrFutureVersion). Callers decide
-// recovery policy: prompt to delete and recreate, or fail loudly. Loading
+// recovery policy: stage a confirmed replacement, or fail loudly. Loading
 // must never silently discard an unreadable lockfile and overwrite it.
 var ErrCorruptLockfile = errors.New("lockfile is unreadable")
 
@@ -68,7 +72,22 @@ func LoadState(repoRoot string, meta MetadataResolver) (*State, error) {
 // in-memory file when none exists on disk. Use this when the lockfile
 // lives outside the standard .github/workflows/ location.
 func LoadStateAt(lockfilePath string, meta MetadataResolver) (*State, error) {
+	return loadStateAt(lockfilePath, meta, false)
+}
+
+// LoadStateForRecoveryAt starts an empty candidate when the existing file is
+// corrupt. The original bytes remain on disk until Save succeeds.
+func LoadStateForRecoveryAt(lockfilePath string, meta MetadataResolver) (*State, error) {
+	return loadStateAt(lockfilePath, meta, true)
+}
+
+func loadStateAt(lockfilePath string, meta MetadataResolver, recoverCorrupt bool) (*State, error) {
+	lockfilePath, err := filepath.Abs(lockfilePath)
+	if err != nil {
+		return nil, fmt.Errorf("resolving lockfile path: %w", err)
+	}
 	contents, err := os.ReadFile(lockfilePath)
+	baselineExists := err == nil
 
 	var file parserlock.File
 	var originalVersion string
@@ -76,6 +95,9 @@ func LoadStateAt(lockfilePath string, meta MetadataResolver) (*State, error) {
 	case err == nil:
 		originalVersion = extractVersion(contents)
 		file, err = parserlock.Parse(contents)
+		if err == nil {
+			err = validateReferences(file)
+		}
 		if err != nil {
 			// A future-version lockfile (written by a newer binary) must
 			// surface to the user — silently overwriting it would destroy
@@ -91,7 +113,11 @@ func LoadStateAt(lockfilePath string, meta MetadataResolver) (*State, error) {
 			// dependency entry missing a required key) is surfaced, not
 			// swallowed. Treating it as empty here would silently discard
 			// the user's pins and overwrite them on the next save.
-			return nil, fmt.Errorf("%w: %s: %v", ErrCorruptLockfile, parserlock.Path, err)
+			if !recoverCorrupt {
+				return nil, fmt.Errorf("%w: %s: %v", ErrCorruptLockfile, parserlock.Path, err)
+			}
+			file = parserlock.File{Version: parserlock.Version}
+			originalVersion = ""
 		}
 	case errors.Is(err, os.ErrNotExist):
 		file = parserlock.File{Version: parserlock.Version}
@@ -116,6 +142,8 @@ func LoadStateAt(lockfilePath string, meta MetadataResolver) (*State, error) {
 		meta:            meta,
 		idCache:         map[string][2]int64{},
 		hostname:        "github.com",
+		baseline:        append([]byte(nil), contents...),
+		baselineExists:  baselineExists,
 	}
 	// Normalize on-disk entries to the canonical (lowercased) pin form so any
 	// legacy mixed-case keys are rewritten on the next Save.
@@ -231,9 +259,12 @@ func (s *State) VerifyHosts(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("verifying repository identity for %s on %s: %w", key, hostname, err)
 		}
-		if ownerID != action.OwnerID || repoID != action.RepoID {
+		if repoID != action.RepoID || ownerID == 0 || repoID == 0 {
 			return fmt.Errorf("dependency %s does not match its %s repository IDs; restore a lockfile for this host or regenerate the lockfile after reviewing the dependency", key, hostname)
 		}
+		action.OwnerID = ownerID
+		s.file.Dependencies[key] = action
+		s.idCache[repoIDKey(hostname, pin.Owner, pin.Repo)] = [2]int64{ownerID, repoID}
 	}
 	return nil
 }
@@ -303,17 +334,68 @@ func (s *State) Get(workflowKey string) ([]dep.Dependency, error) {
 			return nil, fmt.Errorf("invalid pin %q in %s for workflow %q", raw, parserlock.Path, workflowKey)
 		}
 		d := pinToDep(pin)
-		if action, found := s.file.Dependencies[raw]; found {
-			d.Hostname = s.hostOrHome(action.Hostname)
-			d.Tag, d.Branch = parserlock.SplitRef(action.Ref)
-			if idx := strings.Index(action.Commit, "-"); idx >= 0 {
-				d.HashAlgo = action.Commit[:idx]
-				d.SHA = action.Commit[idx+1:]
-			}
+		action, found := s.file.Dependencies[raw]
+		if !found {
+			return nil, fmt.Errorf("workflow %q references missing dependency %q", workflowKey, raw)
+		}
+		d.Hostname = s.hostOrHome(action.Hostname)
+		d.Tag, d.Branch = parserlock.SplitRef(action.Ref)
+		if idx := strings.Index(action.Commit, "-"); idx >= 0 {
+			d.HashAlgo = action.Commit[:idx]
+			d.SHA = action.Commit[idx+1:]
 		}
 		out = append(out, d)
 	}
 	return out, nil
+}
+
+// LockedPin is one entry in a workflow's recorded closure.
+type LockedPin struct {
+	Pin    parserlock.Pin
+	Action parserlock.Action
+	// Parent is the canonical key of the composite action that pulls this
+	// pin in; empty for the workflow's direct pins.
+	Parent string
+}
+
+// Closure returns the workflow's recorded pins, direct and transitive, by
+// walking the `uses:` list of each direct pin that live accepts. Stale roots
+// are skipped so their children are not reported. Each pin appears once.
+func (s *State) Closure(workflowKey string, live func(parserlock.Pin) bool) []LockedPin {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []LockedPin
+	seen := map[string]bool{}
+	var walk func(key, parent string)
+	walk = func(key, parent string) {
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		pin, ok := parserlock.ParsePin(key)
+		action, found := s.file.Dependencies[key]
+		if !ok || !found {
+			return
+		}
+		out = append(out, LockedPin{Pin: pin, Action: action, Parent: parent})
+		for _, child := range action.Uses {
+			walk(child, key)
+		}
+	}
+	for _, key := range s.file.Workflows[workflowKey] {
+		if pin, ok := parserlock.ParsePin(key); ok && live(pin) {
+			walk(key, "")
+		}
+	}
+	return out
+}
+
+// RecordedRepoID returns the repo ID recorded for owner/repo, or 0. It never
+// hits the network.
+func (s *State) RecordedRepoID(owner, repo string) int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.idCache[repoIDKey(s.hostname, owner, repo)][1]
 }
 
 // AllDeps returns every action entry in the lockfile as a Dependency,
@@ -498,14 +580,25 @@ func (s *State) Set(ctx context.Context, workflowKey string, deps []dep.Dependen
 			if ref == "" {
 				ref = existing.Ref
 			}
-			for _, u := range existing.Uses {
-				usesSet[u] = true
+			if sameCommit(existing, d) {
+				for _, u := range existing.Uses {
+					usesSet[u] = true
+				}
+			}
+		}
+		for _, from := range d.RenamedFrom {
+			if renamed, found := s.file.Dependencies[from]; found && sameCommit(renamed, d) {
+				for _, u := range renamed.Uses {
+					usesSet[u] = true
+				}
 			}
 		}
 		oldRef := d.OriginalRef
 		if !isSHARef(d.Ref) && isSHARef(oldRef) {
 			shaPin := pin
 			shaPin.Ref = oldRef
+			// A verified annotated-tag object can peel to a different commit
+			// SHA during this rekey, while declaring the same dependencies.
 			if shaExisting, shaOK := s.file.Dependencies[shaPin.String()]; shaOK {
 				if !ok && ref == "" {
 					ref = shaExisting.Ref
@@ -541,32 +634,65 @@ func (s *State) Set(ctx context.Context, workflowKey string, deps []dep.Dependen
 // entries (pins referenced by no workflow). When the in-memory file is empty
 // after GC, the on-disk file is removed.
 func (s *State) Save() error {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.pruneOrphans()
-
-	full := s.lockPath
-
-	if len(s.file.Dependencies) == 0 && len(s.file.Workflows) == 0 {
-		if err := os.Remove(full); err != nil && !errors.Is(err, os.ErrNotExist) {
+	held := s.mutationFile != nil
+	s.mu.Unlock()
+	if !held {
+		release, err := s.BeginMutation(context.Background())
+		if err != nil {
 			return err
 		}
-		return nil
+		defer release()
 	}
-
-	out, err := marshalDeterministic(s.file, s.hostname)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkBaseline(); err != nil {
+		return err
+	}
+	out, err := s.prepareSave()
 	if err != nil {
 		return err
 	}
-	out = append([]byte(lockfileHeader), out...)
+
+	full := s.lockPath
+
+	if out == nil {
+		if err := os.Remove(full); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		s.baseline, s.baselineExists = nil, false
+		return nil
+	}
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		return err
 	}
-	tmp := full + ".tmp"
-	if err := os.WriteFile(tmp, out, 0o644); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(full), ".actions-lock-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, full)
+	defer os.Remove(f.Name())
+	if err := f.Chmod(0o644); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if _, err := f.Write(out); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(f.Name(), full); err != nil {
+		return err
+	}
+	s.baseline, s.baselineExists = append([]byte(nil), out...), true
+	return nil
+}
+
+func sameCommit(action parserlock.Action, d dep.Dependency) bool {
+	return strings.EqualFold(action.Commit, d.HashAlgoOrDetect()+"-"+d.SHA)
 }
 
 // pruneOrphans requires s.mu to be held.

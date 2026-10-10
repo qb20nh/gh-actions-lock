@@ -28,6 +28,7 @@ func RunChecks(ctx context.Context, pw ParsedWorkflow, lf parserlock.File, r Che
 	out = append(out, checkShaAsRef(pw, depIndex)...)
 	out = append(out, checkRefChanged(pw, depPins)...)
 	out = append(out, checkStale(pw, depPins)...)
+	out = append(out, checkDependencyMetadata(pw, wfEntry, lf.Dependencies)...)
 
 	if r != nil {
 		out = append(out, checkMisleadingSha(ctx, pw, r)...)
@@ -55,7 +56,7 @@ func (lp lockedPin) SHA() string {
 
 // parseWorkflowDeps decodes a workflow's dependency pin strings into Pins
 // plus an index keyed by "owner/repo@ref" carrying commit info from the
-// lockfile. Unparseable entries are dropped silently.
+// lockfile. Unparseable or incomplete entries cannot establish coverage.
 func parseWorkflowDeps(rawDeps []string, deps map[string]parserlock.Action) ([]lockedPin, map[string]lockedPin) {
 	pins := make([]lockedPin, 0, len(rawDeps))
 	idx := make(map[string]lockedPin, len(rawDeps))
@@ -64,14 +65,60 @@ func parseWorkflowDeps(rawDeps []string, deps map[string]parserlock.Action) ([]l
 		if !ok {
 			continue
 		}
-		lp := lockedPin{Pin: pin}
-		if action, found := deps[raw]; found {
-			lp.Commit = action.Commit
+		action, found := deps[raw]
+		if !found || action.Commit == "" {
+			continue
 		}
+		lp := lockedPin{Pin: pin, Commit: action.Commit}
 		pins = append(pins, lp)
 		idx[pin.IndexKey()] = lp
 	}
 	return pins, idx
+}
+
+func checkDependencyMetadata(pw ParsedWorkflow, roots []string, deps map[string]parserlock.Action) []Finding {
+	direct := make(map[string]bool, len(pw.Refs))
+	for _, ref := range pw.Refs {
+		direct[parserlock.IndexKey(ref.Owner, ref.Repo, ref.Ref)] = true
+	}
+	seen := make(map[string]bool)
+	var findings []Finding
+	var walk func(key, parent string)
+	walk = func(key, parent string) {
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		action, found := deps[key]
+		if !found || action.Commit == "" {
+			// Direct refs already receive NotPinned or RefChanged findings.
+			if parent == "" && direct[key] {
+				return
+			}
+			f := Finding{
+				WorkflowPath: pw.Path,
+				Category:     NotPinned,
+				Severity:     SeverityError,
+				Confidence:   ConfidenceHigh,
+				Remediable:   true,
+				Detail:       "lockfile dependency " + key + " has no commit metadata",
+				Remediation:  "regenerate the lockfile with `gh actions-lock`",
+				ParentNWO:    parent,
+			}
+			if pin, ok := parserlock.ParsePin(key); ok {
+				f.Dependency = &dep.Dependency{NWO: pin.NWO, Ref: pin.Ref}
+			}
+			findings = append(findings, f)
+			return
+		}
+		for _, child := range action.Uses {
+			walk(child, key)
+		}
+	}
+	for _, key := range roots {
+		walk(key, "")
+	}
+	return findings
 }
 
 // newRefFinding builds a Finding with the common header fields populated

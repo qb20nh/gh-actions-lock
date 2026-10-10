@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	parserlock "github.com/github/actions-lockfile/go/pkg/lockfile"
 	"github.com/github/gh-actions-lock/internal/lockfile"
 	"github.com/github/gh-actions-lock/internal/pipeline/checks"
 	"github.com/stretchr/testify/assert"
@@ -25,7 +26,9 @@ func TestDiagnoseOneParsed_LocalAction_NotOnboarded(t *testing.T) {
 
 	assert.Len(t, wr.Findings, 1)
 	assert.Equal(t, checks.LocalAction, wr.Findings[0].Category)
-	assert.Equal(t, checks.SeverityWarning, wr.Findings[0].Severity)
+	assert.Equal(t, checks.SeverityError, wr.Findings[0].Severity)
+	assert.False(t, wr.IsValid())
+	assert.True(t, wr.SkipCommit)
 }
 
 func TestDiagnoseOneParsed_LocalAction_AlreadyOnboarded(t *testing.T) {
@@ -45,7 +48,25 @@ func TestDiagnoseOneParsed_LocalAction_AlreadyOnboarded(t *testing.T) {
 	assert.Len(t, wr.Findings, 1)
 	assert.Equal(t, checks.LocalAction, wr.Findings[0].Category)
 	assert.Equal(t, checks.SeverityError, wr.Findings[0].Severity)
-	assert.Contains(t, wr.Findings[0].Remediation, "remove")
+	assert.Contains(t, wr.Findings[0].Remediation, "--migrate-local-actions")
+	assert.False(t, wr.IsValid())
+	assert.True(t, wr.SkipCommit)
+}
+
+func TestDiagnoseOneParsed_LocalActionStillChecksRemoteCoverage(t *testing.T) {
+	store, err := lockfile.LoadState(t.TempDir(), noopMeta{})
+	require.NoError(t, err)
+	pw := checks.ParsedWorkflow{
+		Path:       ".github/workflows/ci.yml",
+		LocalPaths: []string{"./generated/action"},
+		Refs:       []parserlock.ActionRef{{Owner: "actions", Repo: "checkout", Ref: "v4"}},
+	}
+	wr := diagnoseOneParsed(context.Background(), pw, nil, store, nil)
+
+	assert.Equal(t, 1, wr.CountByCategory(checks.LocalAction))
+	assert.Equal(t, 1, wr.CountByCategory(checks.NotPinned))
+	assert.False(t, wr.IsValid())
+	assert.True(t, wr.SkipCommit)
 }
 
 func TestDiagnoseOneParsed_SelfRepositoryOnly(t *testing.T) {

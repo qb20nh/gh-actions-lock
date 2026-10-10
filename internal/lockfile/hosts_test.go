@@ -135,7 +135,11 @@ func TestLegacyAndOmittedHostnames(t *testing.T) {
 			}
 			action := store.file.Dependencies["o/r@v1"]
 			for _, field := range []string{"owner", "repo"} {
-				t.Run("rejects changed "+field+" ID", func(t *testing.T) {
+				name := "rejects changed repository ID"
+				if field == "owner" {
+					name = "refreshes owner ID after a transfer"
+				}
+				t.Run(name, func(t *testing.T) {
 					changed := action
 					if field == "owner" {
 						changed.OwnerID = 200
@@ -143,7 +147,12 @@ func TestLegacyAndOmittedHostnames(t *testing.T) {
 						changed.RepoID = 200
 					}
 					store.file.Dependencies["o/r@v1"] = changed
-					require.ErrorContains(t, store.VerifyHosts(context.Background()), "regenerate the lockfile")
+					if field == "owner" {
+						require.NoError(t, store.VerifyHosts(context.Background()))
+						assert.EqualValues(t, ownerID, store.File().Dependencies["o/r@v1"].OwnerID)
+					} else {
+						require.ErrorContains(t, store.VerifyHosts(context.Background()), "regenerate the lockfile")
+					}
 				})
 			}
 		})

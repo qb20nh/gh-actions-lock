@@ -12,6 +12,10 @@ import (
 // as findings without re-loading the file.
 type ParsedWorkflow struct {
 	Path string
+	// SourceContents records the source bytes that produced this inventory.
+	SourceContents map[string][]byte
+	// SourcePaths records each source path's resolved identity at parse time.
+	SourcePaths map[string]string
 	// Refs are all remote dependency roots attributed to the workflow. This
 	// includes refs found inside in-repo `$/…` actions.
 	Refs []parserlock.ActionRef
@@ -54,14 +58,19 @@ func (pw ParsedWorkflow) PartitionRefs() (recorded, unrecorded []parserlock.Acti
 	}
 	haveDep := make(map[string]bool, len(pw.ExistingDeps)*2)
 	for _, d := range pw.ExistingDeps {
+		if d.SHA == "" {
+			continue
+		}
 		nwo := strings.ToLower(d.NWO)
 		haveDep[nwo+"@"+d.Ref] = true
-		if d.SHA != "" {
-			haveDep[nwo+"@"+strings.ToLower(d.SHA)] = true
-		}
+		haveDep[nwo+"@"+strings.ToLower(d.SHA)] = true
 	}
 	for _, r := range pw.Refs {
-		if haveDep[strings.ToLower(r.Owner+"/"+r.Repo)+"@"+r.Ref] {
+		ref := r.Ref
+		if parserlock.IsFullSha(ref) {
+			ref = strings.ToLower(ref)
+		}
+		if haveDep[strings.ToLower(r.Owner+"/"+r.Repo)+"@"+ref] {
 			recorded = append(recorded, r)
 		} else {
 			unrecorded = append(unrecorded, r)
@@ -79,9 +88,8 @@ func (pw ParsedWorkflow) IsFullyRecorded() bool {
 
 // IsImmutableRef reports whether ref is a full semver tag (e.g. v4.2.1),
 // which resolves to exactly one commit for its entire lifetime. Full semver
-// pins are re-verified against upstream on the default path; mutable refs
-// (v4, v4.2, branches) are trusted until --rescan because they legitimately
-// move.
+// pins have their tag re-checked on every run; mutable refs (v4, v4.2,
+// branches) stay locked until --relock because they legitimately move.
 func IsImmutableRef(ref string) bool {
 	sv, ok := parserlock.ParseSemVer(ref)
 	return ok && sv.IsFull()
@@ -92,10 +100,17 @@ func IsImmutableRef(ref string) bool {
 func (pw ParsedWorkflow) RecordedDeps(recorded []parserlock.ActionRef) []dep.Dependency {
 	refKeys := make(map[string]bool, len(recorded))
 	for _, r := range recorded {
-		refKeys[strings.ToLower(r.Owner+"/"+r.Repo)+"@"+r.Ref] = true
+		ref := r.Ref
+		if parserlock.IsFullSha(ref) {
+			ref = strings.ToLower(ref)
+		}
+		refKeys[strings.ToLower(r.Owner+"/"+r.Repo)+"@"+ref] = true
 	}
 	var out []dep.Dependency
 	for _, d := range pw.ExistingDeps {
+		if d.SHA == "" {
+			continue
+		}
 		nwo := strings.ToLower(d.NWO)
 		if refKeys[nwo+"@"+d.Ref] || refKeys[nwo+"@"+strings.ToLower(d.SHA)] {
 			out = append(out, d)

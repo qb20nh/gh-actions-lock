@@ -8,15 +8,21 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/github/gh-actions-lock/internal/ghapi/httpmock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 type requestCountingTransport struct {
 	calls atomic.Int64
+	// parity answers parity queries without counting them.
+	parity bool
 }
 
-func (t *requestCountingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+func (t *requestCountingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.parity && httpmock.GraphQL(`commit: object\(oid`)(req) {
+		return parityOK(req)
+	}
 	t.calls.Add(1)
 	return nil, errors.New("unexpected HTTP request")
 }
@@ -40,11 +46,11 @@ jobs:
 	require.NoError(t, os.WriteFile(workflowPath, workflow, 0o600))
 	t.Chdir(dir)
 
-	_, _, err := runCommandWithHTTP(t, transport, workflowPath)
-	// Migration runs by default and validates self repository refs first, so an
-	// invalid `$/…` ref aborts the run before any dependency resolution.
+	_, stderr, err := runCommandWithHTTP(t, transport, workflowPath)
+	// Invalid self repository refs are rejected before dependency resolution.
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid self repository reference")
+	assert.Contains(t, stderr, "invalid self repository ref")
+	assert.Contains(t, stderr, "self repository actions must not carry an @ref: $/actions/bad@v1")
 	assert.Zero(t, transport.calls.Load(), "invalid syntax should be rejected before dependency resolution")
 
 	gotWorkflow, err := os.ReadFile(workflowPath)
@@ -83,7 +89,7 @@ jobs:
 	require.NoError(t, os.WriteFile(workflowPath, workflow, 0o600))
 	t.Chdir(dir)
 
-	_, _, err := runCommandWithHTTP(t, transport, workflowPath)
+	_, _, err := runCommandWithHTTP(t, transport, "--migrate-local-actions", workflowPath)
 
 	require.Error(t, err)
 	assert.Zero(t, transport.calls.Load(), "invalid syntax should stop migration before dependency resolution")
@@ -97,7 +103,7 @@ jobs:
 
 func TestExistingSHARefRewritesSelfRepositoryAction(t *testing.T) {
 	const sha = "bcd2ba49218906704ab6c1aa796996da409d3eb1"
-	transport := &requestCountingTransport{}
+	transport := &requestCountingTransport{parity: true}
 
 	dir := t.TempDir()
 	require.NoError(t, os.Mkdir(filepath.Join(dir, ".git"), 0o755))

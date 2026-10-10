@@ -3,15 +3,17 @@ package pin
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
-	"runtime"
+	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/github/gh-actions-lock/internal/dep"
 	"github.com/github/gh-actions-lock/internal/lockfile"
+	"github.com/github/gh-actions-lock/internal/pipeline/checks"
 	"github.com/github/gh-actions-lock/internal/workflowfile"
-	"golang.org/x/sync/errgroup"
 )
 
 // CommitOptions configures the Commit pass.
@@ -20,13 +22,23 @@ type CommitOptions struct {
 	OnProgress func(phase string)
 	// SkipNewWorkflowEntries forces the Commit phase to skip workflows with no existing lockfile entry.
 	SkipNewWorkflowEntries bool
+	// MutationHeld means the caller holds State.BeginMutation for this run.
+	MutationHeld bool
 }
 
-// Commit writes a planned Record to disk: rewrites workflow files and
-// updates the lockfile store. All-or-nothing semantics — if any write
-// fails, previously written files are not rolled back (best-effort),
-// but the error is returned immediately.
+// Commit validates all proposed source and lock changes before writing. A write
+// failure restores prior source contents; restoration failures are returned too.
 func Commit(ctx context.Context, rec *Record, store *lockfile.State, copts *CommitOptions) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if copts == nil || !copts.MutationHeld {
+		release, err := store.BeginMutation(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
 	progress := func(string) {}
 	if copts != nil && copts.OnProgress != nil {
 		progress = copts.OnProgress
@@ -40,114 +52,271 @@ func Commit(ctx context.Context, rec *Record, store *lockfile.State, copts *Comm
 		}
 		rec.Workflows = workflows
 	}
-
-	// Phase 1: Rewrite workflow files (uses: line changes).
-	if len(rec.Workflows) > 0 {
-		progress("Rewriting workflows")
-	}
-
-	// Rewrite workflow files in parallel. Uses errgroup rather than pinpool
-	// because this is fast local I/O — no progress reporting or API rate
-	// limiting needed. The pool is for network-bound work.
-	g, _ := errgroup.WithContext(ctx)
-	g.SetLimit(runtime.GOMAXPROCS(0))
-	for _, wp := range rec.Workflows {
-		g.Go(func() error {
-			if err := rewriteWorkflow(wp); err != nil {
-				return fmt.Errorf("rewriting %s: %w", wp.Path, err)
-			}
-			return nil
-		})
-	}
-	if err := g.Wait(); err != nil {
+	if err := validateSourceBaselines(rec.Workflows); err != nil {
 		return err
 	}
-
-	// Action files can be shared by several workflows, so merge their
-	// rewrites and write each file once, serially.
-	if err := rewriteSelfActionFiles(rec.Workflows); err != nil {
+	if err := validateSourceTopology(rec.Workflows); err != nil {
 		return err
 	}
-
-	// Phase 2: Update lockfile entries for each scanned workflow.
-	pinnedByWorkflow := groupPinnedByWorkflow(rec)
-	if len(rec.Workflows) > 0 {
-		progress("Updating lockfile")
+	if err := validateRequiredRewrites(rec.Workflows); err != nil {
+		return err
 	}
-	for _, wp := range rec.Workflows {
-		wfPath := wp.Path
-		wfKey := workflowfile.KeyFromPath(wfPath)
-		deps := pinnedByWorkflow[wfPath]
-		parentMap := buildParentMap(rec, wfPath)
-		directKeys := buildDirectKeys(rec, wfPath)
-		deps = retainUnresolvablePins(rec, store, wfPath, deps, directKeys)
-		if err := store.Set(ctx, wfKey, deps, parentMap, directKeys); err != nil {
-			return fmt.Errorf("updating lockfile for %s: %w", wfPath, err)
-		}
-	}
-
-	// Phase 3: Persist lockfile to disk.
-	if err := store.Save(); err != nil {
-		return fmt.Errorf("saving lockfile: %w", err)
-	}
-
-	return nil
-}
-
-func rewriteWorkflow(wp WorkflowPlan) error {
-	wf, err := workflowfile.Load(wp.Path)
+	files, err := stageSourceChanges(rec.Workflows)
 	if err != nil {
 		return err
 	}
 
-	content := wf.Content
-	if len(wp.Rewrites) > 0 {
-		content, _, err = wf.RewriteActionRefs(wp.Rewrites)
-		if err != nil {
-			return fmt.Errorf("applying rewrites: %w", err)
+	pinnedByWorkflow := groupPinnedByWorkflow(rec)
+	progress("Validating lockfile")
+	for _, wp := range rec.Workflows {
+		wfKey := workflowfile.KeyFromPath(wp.Path)
+		deps := pinnedByWorkflow[wp.Path]
+		parentMap := buildParentMap(rec, wp.Path)
+		directKeys := buildDirectKeys(rec, wp.Path)
+		deps = retainUnresolvablePins(rec, store, wp.Path, deps, directKeys)
+		if err := store.Set(ctx, wfKey, deps, parentMap, directKeys); err != nil {
+			return fmt.Errorf("updating lockfile for %s: %w", wp.Path, err)
 		}
 	}
-
-	if bytes.Equal(content, wf.Content) {
-		return nil
+	if err := store.Validate(); err != nil {
+		return fmt.Errorf("validating lockfile: %w", err)
 	}
-	return os.WriteFile(wp.Path, content, 0o644)
-}
-
-// rewriteSelfActionFiles applies each workflow's rewrites to the in-repo
-// action files it reaches via `$/…`.
-func rewriteSelfActionFiles(plans []WorkflowPlan) error {
-	merged := make(map[string]map[string]string)
-	for _, wp := range plans {
-		if len(wp.Rewrites) == 0 {
+	if err := validateCandidateCoverage(rec.Workflows, files, store); err != nil {
+		return err
+	}
+	if err := validateSourceBaselines(rec.Workflows); err != nil {
+		return err
+	}
+	if err := validateSourceTopology(rec.Workflows); err != nil {
+		return err
+	}
+	// Check every baseline before the first write so an editor change cannot
+	// be silently overwritten by the staged content.
+	for _, file := range files {
+		current, err := os.ReadFile(file.path)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(current, file.original) {
+			return fmt.Errorf("%s changed while preparing rewrites; re-run", file.path)
+		}
+	}
+	var written []sourceChange
+	rollback := func(cause error) error {
+		for i := len(written) - 1; i >= 0; i-- {
+			file := written[i]
+			if err := replaceSource(file.path, file.original, file.mode); err != nil {
+				cause = errors.Join(cause, fmt.Errorf("restoring %s: %w", file.path, err))
+			}
+		}
+		return cause
+	}
+	progress("Rewriting workflows")
+	for _, file := range files {
+		if bytes.Equal(file.original, file.content) {
 			continue
 		}
-		for _, path := range wp.SelfActionFiles {
+		if err := ctx.Err(); err != nil {
+			return rollback(err)
+		}
+		if err := replaceSource(file.path, file.content, file.mode); err != nil {
+			return rollback(fmt.Errorf("writing %s: %w", file.path, err))
+		}
+		written = append(written, file)
+	}
+	progress("Saving lockfile")
+	if err := ctx.Err(); err != nil {
+		return rollback(err)
+	}
+	if err := store.Save(); err != nil {
+		return rollback(fmt.Errorf("saving lockfile: %w", err))
+	}
+	rec.Committed = true
+	return nil
+}
+
+type sourceChange struct {
+	path              string
+	original, content []byte
+	mode              os.FileMode
+}
+
+func stageSourceChanges(plans []WorkflowPlan) ([]sourceChange, error) {
+	merged := make(map[string]map[string]string)
+	for _, wp := range plans {
+		for _, source := range append([]string{wp.Path}, wp.SelfActionFiles...) {
+			path, err := canonicalSourcePath(source)
+			if err != nil {
+				return nil, fmt.Errorf("resolving source %s: %w", source, err)
+			}
 			if merged[path] == nil {
 				merged[path] = make(map[string]string)
 			}
-			for oldUses, newUses := range wp.Rewrites {
-				merged[path][oldUses] = newUses
+			for oldUse, newUse := range wp.Rewrites {
+				if existing, ok := merged[path][oldUse]; ok && existing != newUse {
+					return nil, fmt.Errorf("conflicting rewrites for %s in %s", oldUse, path)
+				}
+				merged[path][oldUse] = newUse
 			}
 		}
 	}
-	for path, rewrites := range merged {
+	paths := make([]string, 0, len(merged))
+	for path := range merged {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	var files []sourceChange
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	for _, path := range paths {
+		if err := workflowfile.ValidatePathWithinRoot(cwd, path); err != nil {
+			return nil, fmt.Errorf("validating source path %s: %w", path, err)
+		}
 		wf, err := workflowfile.Load(path)
 		if err != nil {
-			return fmt.Errorf("loading %s: %w", path, err)
+			return nil, fmt.Errorf("loading %s: %w", path, err)
 		}
-		content, changed, err := wf.RewriteActionRefs(rewrites)
+		content, _, err := wf.RewriteActionRefs(merged[path])
 		if err != nil {
-			return fmt.Errorf("rewriting %s: %w", path, err)
+			return nil, fmt.Errorf("rewriting %s: %w", path, err)
 		}
-		if changed == 0 || bytes.Equal(content, wf.Content) {
-			continue
+		if _, err := workflowfile.Parse(path, content); err != nil {
+			return nil, fmt.Errorf("validating rewritten %s: %w", path, err)
 		}
-		if err := os.WriteFile(path, content, 0o644); err != nil {
-			return fmt.Errorf("writing %s: %w", path, err)
+		info, err := os.Stat(path)
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, sourceChange{path: path, original: wf.Content, content: content, mode: info.Mode().Perm()})
+	}
+	return files, nil
+}
+
+func validateSourceBaselines(plans []WorkflowPlan) error {
+	for _, wp := range plans {
+		for path, original := range wp.SourcePaths {
+			current, err := canonicalSourcePath(path)
+			if err != nil {
+				return fmt.Errorf("checking source identity %s: %w", path, err)
+			}
+			if current != original {
+				return fmt.Errorf("%s changed source identity since dependency discovery; re-run", path)
+			}
+		}
+		for path, original := range wp.SourceContents {
+			current, err := os.ReadFile(path)
+			if err != nil {
+				return fmt.Errorf("checking source baseline %s: %w", path, err)
+			}
+			if !bytes.Equal(current, original) {
+				return fmt.Errorf("%s changed since dependency discovery; re-run", path)
+			}
 		}
 	}
 	return nil
+}
+
+func validateSourceTopology(plans []WorkflowPlan) error {
+	for _, wp := range plans {
+		if wp.SourceContents == nil {
+			continue
+		}
+		wf, err := workflowfile.Load(wp.Path)
+		if err != nil {
+			return err
+		}
+		refs := wf.ExtractActionRefs()
+		current := workflowfile.ScanSelfRepositoryActions(wp.Path, refs.SelfRepositoryActionRefs, refs.LocalWorkflowRefs...)
+		if len(current.Errors) > 0 || len(current.SelfRepositoryRefErrs) > 0 || len(current.LocalPaths) > 0 {
+			return fmt.Errorf("source dependencies for %s changed since discovery; re-run", wp.Path)
+		}
+		original := make(map[string]bool, len(wp.SelfActionFiles))
+		for _, path := range wp.SelfActionFiles {
+			abs, err := filepath.Abs(path)
+			if err != nil {
+				return err
+			}
+			original[abs] = true
+		}
+		if len(current.ActionFiles) != len(original) {
+			return fmt.Errorf("source dependencies for %s changed since discovery; re-run", wp.Path)
+		}
+		for _, path := range current.ActionFiles {
+			if !original[path] {
+				return fmt.Errorf("source dependencies for %s changed since discovery; re-run", wp.Path)
+			}
+		}
+	}
+	return nil
+}
+
+func validateCandidateCoverage(plans []WorkflowPlan, files []sourceChange, store *lockfile.State) error {
+	candidates := map[string][]byte{}
+	for _, file := range files {
+		abs, err := canonicalSourcePath(file.path)
+		if err != nil {
+			return err
+		}
+		candidates[abs] = file.content
+	}
+	for _, wp := range plans {
+		pw := checks.ParsedWorkflow{Path: wp.Path}
+		var err error
+		pw.ExistingDeps, err = store.Get(workflowfile.KeyFromPath(wp.Path))
+		if err != nil {
+			return err
+		}
+		for _, path := range append([]string{wp.Path}, wp.SelfActionFiles...) {
+			abs, err := canonicalSourcePath(path)
+			if err != nil {
+				return err
+			}
+			wf, err := workflowfile.Parse(path, candidates[abs])
+			if err != nil {
+				return err
+			}
+			scan := wf.ExtractActionRefs()
+			if len(scan.LocalPaths) > 0 || len(scan.SelfRepositoryRefErrs) > 0 {
+				return fmt.Errorf("source %s has incomplete dependency coverage", path)
+			}
+			pw.Refs = append(pw.Refs, scan.Refs...)
+		}
+		_, missing := pw.PartitionRefs()
+		if len(missing) > 0 {
+			return fmt.Errorf("candidate lockfile does not cover %s in %s", missing[0].FullName()+"@"+missing[0].Ref, wp.Path)
+		}
+	}
+	return nil
+}
+
+func canonicalSourcePath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(abs)
+}
+
+func replaceSource(path string, content []byte, mode os.FileMode) error {
+	file, err := os.CreateTemp(filepath.Dir(path), ".actions-lock-source-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	if err := file.Chmod(mode); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if _, err := file.Write(content); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(file.Name(), path)
 }
 
 func isPinOrVerified(r Resolution) bool {
@@ -167,6 +336,7 @@ func groupPinnedByWorkflow(rec *Record) map[string][]dep.Dependency {
 				Ref:         e.Ref,
 				SHA:         e.SHA,
 				OriginalRef: e.AutoFixedRef,
+				RenamedFrom: e.RenamedFrom,
 				Branch:      e.OnBranch,
 				Tag:         e.Tag,
 			})
@@ -187,7 +357,7 @@ func retainUnresolvablePins(rec *Record, store *lockfile.State, wfPath string, d
 		}
 		for _, wf := range e.Workflows {
 			if wf == wfPath {
-				retain[strings.ToLower(e.NWO+"@"+e.Ref)] = true
+				retain[strings.ToLower(e.NWO)+"@"+e.Ref] = true
 			}
 		}
 	}
@@ -200,10 +370,10 @@ func retainUnresolvablePins(rec *Record, store *lockfile.State, wfPath string, d
 	}
 	have := make(map[string]bool, len(deps))
 	for _, d := range deps {
-		have[strings.ToLower(d.NWO+"@"+d.Ref)] = true
+		have[strings.ToLower(d.NWO)+"@"+d.Ref] = true
 	}
 	for _, d := range existing {
-		k := strings.ToLower(d.NWO + "@" + d.Ref)
+		k := strings.ToLower(d.NWO) + "@" + d.Ref
 		if retain[k] && !have[k] {
 			deps = append(deps, d)
 			directKeys[d.Key()] = true
@@ -245,4 +415,37 @@ func buildDirectKeys(rec *Record, wfPath string) map[string]bool {
 		}
 	}
 	return keys
+}
+
+func validateRequiredRewrites(plans []WorkflowPlan) error {
+	for i := range plans {
+		wp := &plans[i]
+		if len(wp.RequiredRewrites) == 0 {
+			continue
+		}
+		found := make(map[string]int)
+		wp.RewrittenIn = make(map[string][]string)
+		for _, path := range append([]string{wp.Path}, wp.SelfActionFiles...) {
+			wf, err := workflowfile.Load(path)
+			if err != nil {
+				return fmt.Errorf("validating required rewrites in %s: %w", path, err)
+			}
+			matches, err := wf.ValidateRequiredActionRefRewrites(wp.RequiredRewrites)
+			if err != nil {
+				return fmt.Errorf("validating required rewrites in %s: %w", path, err)
+			}
+			for oldUse, n := range matches {
+				found[oldUse] += n
+				if n > 0 {
+					wp.RewrittenIn[oldUse] = append(wp.RewrittenIn[oldUse], path)
+				}
+			}
+		}
+		for oldUse := range wp.RequiredRewrites {
+			if found[oldUse] == 0 {
+				return fmt.Errorf("required action rewrite for %s was not found in writable workflow sources", oldUse)
+			}
+		}
+	}
+	return nil
 }

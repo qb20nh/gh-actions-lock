@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -318,11 +320,7 @@ func TestState_DiamondTransitiveDepEmittedCorrectly(t *testing.T) {
 	}
 }
 
-// TestState_SaveGCHandlesCyclicUses verifies that Save()'s garbage collection
-// walk (which follows uses: edges) terminates when the uses: graph contains a
-// cycle (A uses B, B uses A). Both entries should be retained in the write.
-// The new parser rejects cycles on reload, so we verify Save doesn't hang
-// and the cycle is caught on re-parse.
+// Save must reject a cycle before persisting an unreadable lockfile.
 func TestState_SaveGCHandlesCyclicUses(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".github", "workflows"), 0o755); err != nil {
@@ -350,15 +348,9 @@ func TestState_SaveGCHandlesCyclicUses(t *testing.T) {
 	if err := store.Set(context.Background(), ".github/workflows/ci.yml", deps, parentMap, directKeys); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
-	// Save should not hang (GC walk terminates despite cycle).
-	if err := store.Save(); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
-	// The new parser rejects cycles on reload.
-	_, err = LoadState(dir, fakeMetadataResolver{})
+	err = store.Save()
 	if err == nil {
-		t.Fatal("expected parser to reject cyclic uses on reload")
+		t.Fatal("expected Save to reject cyclic uses")
 	}
 	if !strings.Contains(err.Error(), "cycle") {
 		t.Errorf("expected cycle error, got: %v", err)
@@ -953,5 +945,57 @@ func TestState_TransitiveClosureGolden(t *testing.T) {
 	}
 	if string(raw) != golden {
 		t.Fatalf("lockfile content drifted from golden.\n--- got ---\n%s\n--- want ---\n%s", raw, golden)
+	}
+}
+
+func TestStateClosureIncludesTransitivePins(t *testing.T) {
+	dir := t.TempDir()
+	setupClosure(t, dir)
+	store, err := LoadState(dir, fakeMetadataResolver{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	all := func(parserlock.Pin) bool { return true }
+	got := map[string]string{}
+	for _, lp := range store.Closure(".github/workflows/ci.yml", all) {
+		got[lp.Pin.String()] = lp.Parent
+	}
+	want := map[string]string{
+		"actions/setup-go@v6": "",
+		"actions/cache@v4":    "actions/setup-go@v6",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Closure() = %v, want %v", got, want)
+	}
+	if c := store.Closure(".github/workflows/missing.yml", all); len(c) != 0 {
+		t.Errorf("Closure(missing) = %v, want empty", c)
+	}
+	none := func(parserlock.Pin) bool { return false }
+	if c := store.Closure(".github/workflows/ci.yml", none); len(c) != 0 {
+		t.Errorf("Closure(stale roots) = %v, want empty: children of removed roots must not be walked", c)
+	}
+}
+
+// TestState_SetUnionsUsesAcrossRenames: two old names can dedup to one
+// canonical pin, and every old entry's recorded children must carry over.
+func TestState_SetUnionsUsesAcrossRenames(t *testing.T) {
+	store, err := LoadState(t.TempDir(), fakeMetadataResolver{})
+	if err != nil {
+		t.Fatalf("opening store: %v", err)
+	}
+	sha := "abc123abc123abc123abc123abc123abc123abc1"
+	store.file.Dependencies["old/a@v1"] = parserlock.Action{Ref: "v1", Commit: "sha1-" + sha, Uses: []string{"actions/cache@v4"}}
+	store.file.Dependencies["older/a@v1"] = parserlock.Action{Ref: "v1", Commit: "sha1-" + sha, Uses: []string{"actions/setup-go@v5"}}
+	store.file.Dependencies["stale/a@v1"] = parserlock.Action{Ref: "v1", Commit: "sha1-" + strings.Repeat("f", 40), Uses: []string{"evil/x@v1"}}
+
+	d := dep.Dependency{NWO: "new/a", Ref: "v1", Tag: "v1", SHA: sha, HashAlgo: "sha1", RenamedFrom: []string{"old/a@v1", "older/a@v1", "stale/a@v1"}}
+	if err := store.Set(context.Background(), ".github/workflows/ci.yml", []dep.Dependency{d}, nil, nil); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	got := store.file.Dependencies["new/a@v1"].Uses
+	want := []string{"actions/cache@v4", "actions/setup-go@v5"}
+	if !slices.Equal(got, want) {
+		t.Errorf("uses = %v, want %v", got, want)
 	}
 }

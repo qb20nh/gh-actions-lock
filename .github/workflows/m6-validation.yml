@@ -1,0 +1,128 @@
+name: M6 validation
+
+on:
+  push:
+    branches:
+      - codex/m6-*
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: m6-validation-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate tested commit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: actions/setup-go@v6.4.0
+        with:
+          go-version-file: go.mod
+      - name: Install Ruby
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ruby ruby-webrick
+          ruby --version
+      - name: Formatting, vet, race tests, and stub integration
+        run: make fmt-check vet test test-stub
+      - name: Record validation evidence
+        if: always()
+        run: |
+          m6_runner_version="unavailable; see Set up job logs"
+          for m6_listener in /home/runner/runners/*/bin/Runner.Listener /home/runner/actions-runner/bin/Runner.Listener; do
+            if [ -x "$m6_listener" ]; then
+              m6_runner_version="$("$m6_listener" --version)"
+              break
+            fi
+          done
+          {
+            printf '### M6 validation\n\n'
+            printf 'Tested commit: `%s`\n\n' "$GITHUB_SHA"
+            printf 'Workflow run: %s/%s/actions/runs/%s\n\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            printf 'Runner: `%s` (%s/%s), version: `%s`\n\n' "$RUNNER_NAME" "$RUNNER_OS" "$RUNNER_ARCH" "$m6_runner_version"
+            printf 'Image: `%s` / `%s`\n\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
+            printf 'Checks: `make fmt-check vet test test-stub`; see step results above.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  draft-prerelease:
+    name: Build draft prerelease
+    needs: validate
+    if: github.repository == 'qb20nh/gh-actions-lock' && startsWith(github.ref, 'refs/heads/codex/m6-')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6.0.2
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Prepare exact commit tag and release notes
+        id: prepare
+        shell: bash
+        run: |
+          set -euo pipefail
+          m6_tag="m6-${GITHUB_SHA}"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          m6_remote_tag="$(git ls-remote --tags origin "refs/tags/${m6_tag}")"
+          if [ -n "$m6_remote_tag" ]; then
+            git fetch --no-tags origin "refs/tags/${m6_tag}:refs/tags/${m6_tag}"
+          else
+            git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              tag -a "$m6_tag" "$GITHUB_SHA" -m "M6 validation of ${GITHUB_SHA}"
+            git push origin "refs/tags/${m6_tag}"
+          fi
+          test "$(git cat-file -t "refs/tags/${m6_tag}")" = tag
+          test "$(git rev-parse "${m6_tag}^{commit}")" = "$GITHUB_SHA"
+          m6_remote_commit="$(git ls-remote --tags origin "refs/tags/${m6_tag}^{}" | awk 'NR == 1 { print $1 }')"
+          test "$m6_remote_commit" = "$GITHUB_SHA"
+
+          # Existing published releases must never be clobbered by a rerun.
+          gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > "$RUNNER_TEMP/m6-releases.json"
+          jq -e --arg tag "$m6_tag" \
+            '[.[][] | select(.tag_name == $tag)] | all(.draft == true and .prerelease == true)' \
+            "$RUNNER_TEMP/m6-releases.json" > /dev/null
+
+          m6_runner_version="unavailable; see Set up job logs"
+          for m6_listener in /home/runner/runners/*/bin/Runner.Listener /home/runner/actions-runner/bin/Runner.Listener; do
+            if [ -x "$m6_listener" ]; then
+              m6_runner_version="$("$m6_listener" --version)"
+              break
+            fi
+          done
+          m6_notes_path="$RUNNER_TEMP/m6-release-notes.md"
+          {
+            printf 'Draft prerelease for isolated M6 validation.\n\n'
+            printf 'Tested commit: `%s`\n\n' "$GITHUB_SHA"
+            printf 'Workflow run: %s/%s/actions/runs/%s\n\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            printf 'Runner: `%s` (%s/%s), version: `%s`\n\n' "$RUNNER_NAME" "$RUNNER_OS" "$RUNNER_ARCH" "$m6_runner_version"
+            printf 'Image: `%s` / `%s`\n\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
+            printf 'Passed: formatting, vet, release-script tests, full Go race suite, and stub integration.\n\n'
+            printf 'Assets use the existing release build and attestation action. Deployed `$/` execution and malformed-lock enforcement require separate runtime smoke results.\n'
+          } > "$m6_notes_path"
+          printf 'tag=%s\n' "$m6_tag" >> "$GITHUB_OUTPUT"
+          printf 'notes_path=%s\n' "$m6_notes_path" >> "$GITHUB_OUTPUT"
+          cat "$m6_notes_path" >> "$GITHUB_STEP_SUMMARY"
+      - uses: cli/gh-extension-precompile@v2.1.0
+        with:
+          release_tag: ${{ steps.prepare.outputs.tag }}
+          draft_release: true
+          generate_attestations: true
+          go_version_file: go.mod
+          go_build_options: ./cmd/gh-actions-lock
+      - name: Record draft prerelease evidence
+        env:
+          M6_TAG: ${{ steps.prepare.outputs.tag }}
+          M6_NOTES_PATH: ${{ steps.prepare.outputs.notes_path }}
+        run: |
+          gh release view "$M6_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease \
+            --jq '.isDraft and .isPrerelease' | jq -e 'select(. == true)' > /dev/null
+          gh release edit "$M6_TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$M6_NOTES_PATH"
+          gh release view "$M6_TAG" --repo "$GITHUB_REPOSITORY" --json url --jq '.url' >> "$GITHUB_STEP_SUMMARY"

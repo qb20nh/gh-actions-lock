@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,7 +16,7 @@ import (
 // rewrites `./…` not just in workflow files but also inside in-repo composite
 // action definitions (action.yml), including ones nested a few directories deep.
 // A `./…` whose target does not resolve to an in-repo action file is left
-// untouched — that is the equivalence guard that keeps `$/` a safe replacement.
+// untouched because its source cannot be inspected.
 func TestMigrateLocalActions_CompositeActionFiles(t *testing.T) {
 	dir := t.TempDir()
 	write := func(rel, content string) {
@@ -36,7 +37,7 @@ func TestMigrateLocalActions_CompositeActionFiles(t *testing.T) {
 
 	t.Chdir(dir)
 
-	total, err := migrateLocalActions([]string{filepath.Join(".github", "workflows", "ci.yml")})
+	total, _, err := migrateLocalActions([]string{filepath.Join(".github", "workflows", "ci.yml")})
 	require.NoError(t, err)
 
 	// workflow ./my-action, composite ./helper, composite ./nested/deep = 3.
@@ -71,7 +72,7 @@ func TestMigrateLocalActions_StructuralErrorPreventsAllWrites(t *testing.T) {
 	firstBefore, err := os.ReadFile(firstPath)
 	require.NoError(t, err)
 
-	total, err := migrateLocalActions([]string{firstPath, secondPath})
+	total, _, err := migrateLocalActions([]string{firstPath, secondPath})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid self repository reference")
@@ -98,7 +99,7 @@ func TestMigrateLocalActions_RejectsActionFileSymlinkEscape(t *testing.T) {
 		t.Skipf("creating symlink: %v", err)
 	}
 
-	total, err := migrateLocalActions([]string{workflowPath})
+	total, _, err := migrateLocalActions([]string{workflowPath})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "outside repository root")
@@ -111,8 +112,115 @@ func TestMigrateLocalActions_RejectsActionFileSymlinkEscape(t *testing.T) {
 	assert.Equal(t, outside, gotOutside)
 }
 
-// TestMigrateLocalActions_EndToEnd runs the real command (migration is on by
-// default) against a scratch repo whose local composite chain
+func TestMigrateLocalActions_LeavesUnrelatedFilesUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	require.NoError(t, os.Mkdir(".git", 0o755))
+	files := map[string]string{
+		".github/workflows/selected.yml": "jobs:\n  build:\n    steps:\n      - uses: ./selected\n",
+		"selected/action.yml":            "runs:\n  using: composite\n  steps:\n    - uses: ./helper\n",
+		"helper/action.yml":              "runs:\n  using: composite\n  steps:\n    - run: echo helper\n      shell: bash\n",
+		".github/workflows/other.yml":    "jobs:\n  build:\n    steps:\n      - uses: ./other\n",
+		"other/action.yml":               "runs:\n  using: composite\n  steps:\n    - uses: ./helper\n",
+		"unreferenced/action.yml":        "runs:\n  using: composite\n  steps:\n    - uses: $/bad@v1\n",
+	}
+	for path, content := range files {
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+	}
+
+	count, _, err := migrateLocalActions([]string{".github/workflows/selected.yml"})
+
+	require.NoError(t, err, "an unrelated invalid action must not enter the selected migration scope")
+	assert.Equal(t, 2, count)
+	for _, path := range []string{".github/workflows/other.yml", "other/action.yml", "unreferenced/action.yml"} {
+		got, err := os.ReadFile(path)
+		require.NoError(t, err)
+		assert.Equal(t, files[path], string(got), path)
+	}
+}
+
+func TestVerifyLocalWithLocalActionsPreservesFiles(t *testing.T) {
+	for name, flags := range map[string][]string{
+		"default":                    nil,
+		"explicit migration ignored": {"--migrate-local-actions"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			workflow := writeTempWorkflow(t, "jobs:\n  build:\n    steps:\n      - uses: ./.github/actions/local\n")
+			require.NoError(t, os.Mkdir(".git", 0o755))
+			action := filepath.Join(".github", "actions", "local", "action.yml")
+			require.NoError(t, os.MkdirAll(filepath.Dir(action), 0o755))
+			require.NoError(t, os.WriteFile(action, []byte("runs:\n  using: composite\n  steps:\n    - uses: ./helper\n"), 0o600))
+			lock := filepath.Join(".github", "workflows", "actions.lock")
+			require.NoError(t, os.WriteFile(lock, []byte("version: 'v0.0.3'\nworkflows:\n  '.github/workflows/workflow.yml': []\ndependencies: {}\n"), 0o600))
+			before := snapshotWorkflows(t)
+			transport := &requestCountingTransport{}
+			args := append([]string{"--verify-local", "--json=valid,findings"}, flags...)
+			stdout, _, err := runCommandWithHTTP(t, transport, append(args, workflow)...)
+
+			require.ErrorIs(t, err, errSilent)
+			assert.Equal(t, before, snapshotWorkflows(t))
+			assert.Zero(t, transport.calls.Load(), "offline verification must not contact GitHub")
+			var payload struct {
+				Valid    bool `json:"valid"`
+				Findings []struct {
+					Category string `json:"category"`
+					Severity string `json:"severity"`
+				} `json:"findings"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(stdout), &payload))
+			assert.False(t, payload.Valid)
+			require.Len(t, payload.Findings, 1)
+			assert.Equal(t, "local-action", payload.Findings[0].Category)
+			assert.Equal(t, "error", payload.Findings[0].Severity)
+		})
+	}
+}
+
+func TestLocalActionsDoNotSkipRemotePinVerification(t *testing.T) {
+	reg := &httpmock.Registry{}
+	defer reg.Verify(t)
+	reg.Register(httpmock.GraphQL(`commit: object\(oid`), repoIDMismatch{}.RoundTrip)
+	workflow := writeTempWorkflow(t, `
+jobs:
+  build:
+    steps:
+      - uses: ./generated/action
+      - uses: actions/checkout@v4.2.1
+`, "actions/checkout@v4.2.1=sha1-"+parityTestSHA)
+	before := snapshotWorkflows(t)
+
+	stdout, _, err := runCommandWithHTTP(t, reg, "--no-fix", "--json=valid,findings", workflow)
+
+	require.ErrorIs(t, err, errSilent)
+	assert.Equal(t, before, snapshotWorkflows(t))
+	var payload struct {
+		Valid    bool `json:"valid"`
+		Findings []struct {
+			Category string `json:"category"`
+			Severity string `json:"severity"`
+			Detail   string `json:"detail"`
+		} `json:"findings"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(stdout), &payload))
+	assert.False(t, payload.Valid)
+	local, mismatch := false, false
+	for _, finding := range payload.Findings {
+		if finding.Category == "local-action" {
+			local = true
+			assert.Equal(t, "error", finding.Severity)
+		}
+		if strings.Contains(finding.Detail, "different repository than the one locked") {
+			mismatch = true
+			assert.Equal(t, "error", finding.Severity)
+		}
+	}
+	assert.True(t, local, "workspace-relative actions must report incomplete coverage")
+	assert.True(t, mismatch, "known remote pins must still undergo repository identity checks")
+}
+
+// TestMigrateLocalActions_EndToEnd runs an explicitly opted-in migration
+// against a scratch repo whose local composite chain
 // reaches a pinnable remote action, then asserts on BOTH sides of
 // the mutation: the rewritten workflow/action files AND the generated
 // lockfile. It proves the two behaviours compose correctly in one pass:
@@ -173,7 +281,7 @@ jobs:
 
 	t.Chdir(dir)
 
-	_, _, err := runCommandWithHTTP(t, reg)
+	_, _, err := runCommandWithHTTP(t, reg, "--migrate-local-actions")
 	require.NoError(t, err)
 
 	read := func(rel string) string {
@@ -204,11 +312,7 @@ jobs:
 	assert.NotContains(t, lock, "helper")
 }
 
-// TestMigrateLocalActions_DefaultOnAndOptOut proves the default-on wiring:
-// a plain fix run rewrites an in-repo `./.github/actions/foo` composite ref to
-// `$/…` with no network, --no-fix leaves the file untouched, and the
-// --no-migrate-local-actions opt-out suppresses the rewrite on a fix run.
-func TestMigrateLocalActions_DefaultOnAndOptOut(t *testing.T) {
+func TestMigrateLocalActions_RequiresOptIn(t *testing.T) {
 	const workflow = `name: CI
 on: push
 jobs:
@@ -236,10 +340,10 @@ jobs:
 		return string(b)
 	}
 
-	t.Run("default fix run rewrites to $/", func(t *testing.T) {
+	t.Run("explicit migration rewrites to $/", func(t *testing.T) {
 		transport := &requestCountingTransport{}
 		wf := setup(t)
-		_, _, err := runCommandWithHTTP(t, transport, wf)
+		_, _, err := runCommandWithHTTP(t, transport, "--migrate-local-actions", wf)
 		require.NoError(t, err)
 		got := read(t, wf)
 		assert.Contains(t, got, "uses: $/.github/actions/foo")
@@ -247,19 +351,31 @@ jobs:
 		assert.Zero(t, transport.calls.Load(), "self ref is inherently pinned; no network")
 	})
 
-	t.Run("--no-fix leaves file untouched", func(t *testing.T) {
+	t.Run("default reports incomplete coverage and preserves source", func(t *testing.T) {
 		transport := &requestCountingTransport{}
 		wf := setup(t)
-		_, _, err := runCommandWithHTTP(t, transport, "--no-fix", wf)
-		require.NoError(t, err, "command must succeed so the assertion proves the guard, not an early failure")
+		_, stderr, err := runCommandWithHTTP(t, transport, wf)
+		require.ErrorIs(t, err, errSilent)
+		assert.Contains(t, stderr, "dependency coverage is incomplete")
 		assert.Equal(t, workflow, read(t, wf))
+		assert.NoFileExists(t, filepath.Join(".github", "workflows", "actions.lock"))
+		assert.Zero(t, transport.calls.Load())
+	})
+
+	t.Run("--no-fix reports incomplete coverage without writing", func(t *testing.T) {
+		transport := &requestCountingTransport{}
+		wf := setup(t)
+		_, _, err := runCommandWithHTTP(t, transport, "--no-fix", "--migrate-local-actions", wf)
+		require.ErrorIs(t, err, errSilent)
+		assert.Equal(t, workflow, read(t, wf))
+		assert.NoFileExists(t, filepath.Join(".github", "workflows", "actions.lock"))
 	})
 
 	t.Run("--no-migrate-local-actions suppresses rewrite", func(t *testing.T) {
 		transport := &requestCountingTransport{}
 		wf := setup(t)
 		_, _, err := runCommandWithHTTP(t, transport, "--no-migrate-local-actions", wf)
-		require.NoError(t, err, "command must succeed so the assertion proves the opt-out, not an early failure")
+		require.ErrorIs(t, err, errSilent)
 		got := read(t, wf)
 		assert.Contains(t, got, "uses: ./.github/actions/foo", "opt-out leaves the ./… ref in place")
 		assert.NotContains(t, got, "$/", "opt-out means no migration to $/")
@@ -311,7 +427,7 @@ workflows:
 			require.NoError(t, os.WriteFile(lockPath, []byte(lock), 0o600))
 
 			transport := &requestCountingTransport{}
-			_, _, err := runCommandWithHTTP(t, transport, "--rescan", "--no-migrate-local-actions")
+			_, _, err := runCommandWithHTTP(t, transport, "--relock", "--no-migrate-local-actions")
 			require.Error(t, err)
 			got, readErr := os.ReadFile(lockPath)
 			require.NoError(t, readErr)

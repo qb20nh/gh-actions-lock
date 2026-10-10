@@ -75,6 +75,8 @@ type WorkflowReport struct {
 	RewriteRefs []parserlock.ActionRef
 	// SelfActionFiles are in-repo action definition files reached via `$/…`.
 	SelfActionFiles []string
+	SourceContents  map[string][]byte
+	SourcePaths     map[string]string
 	// SelfActionRefs are the remote refs found specifically inside SelfActionFiles.
 	SelfActionRefs []parserlock.ActionRef
 	// Deps are the existing pinned dependencies (nil if not pinned).
@@ -121,7 +123,7 @@ func (f *Finding) IsValid() bool {
 		return true
 	}
 	switch f.Category {
-	case Valid, RunOnly, LocalAction, ShaAsRef, RefMoved, VersionRef, OnboardingRequired, StaleWorkflow, SelfRepositoryAction, FreshTag, CooldownConfigIgnored:
+	case Valid, RunOnly, LocalAction, RepoRenamed, ShaAsRef, RefMoved, VersionRef, OnboardingRequired, StaleWorkflow, SelfRepositoryAction, FreshTag, CooldownConfigIgnored:
 		return true
 	case NotPinned:
 		return f.ActionRef == nil // workflow-level is a warning
@@ -137,7 +139,7 @@ func (f *Finding) IsWarning() bool {
 		return true
 	case f.Category == RefMoved:
 		return true
-	case f.Category == LocalAction:
+	case f.Category == LocalAction, f.Category == RepoRenamed:
 		return f.Severity != SeverityError
 	case f.Category.IsInconclusive():
 		return true
@@ -185,21 +187,6 @@ func (r *Report) IsValid() bool {
 		}
 	}
 	return true
-}
-
-// HasInconclusive reports whether the report contains any inconclusive
-// findings (reachability-unknown, ancestry-unknown). These are treated as
-// warnings by default, but callers that need a strict gate (e.g. --rescan)
-// can use this to fail when verification couldn't complete.
-func (r *Report) HasInconclusive() bool {
-	for _, wr := range r.Workflows {
-		for _, f := range wr.Findings {
-			if f.Category.IsInconclusive() {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // IsValid returns true if no findings represent integrity violations.

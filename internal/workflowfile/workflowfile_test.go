@@ -39,8 +39,7 @@ func TestExtractActionRefsMixed(t *testing.T) {
 	assert.Equal(t, "save", refs[1].Path)
 	assert.Equal(t, "actions/setup-node", refs[2].NWO())
 
-	assert.Len(t, localPaths, 1)
-	assert.Equal(t, "./local-action", localPaths[0])
+	assert.Equal(t, []string{"./local-action", "./.github/workflows/reusable.yml"}, localPaths)
 	assert.Equal(t, []string{
 		"docker://alpine:3.18 is not covered by the actions lockfile; container image tags are mutable",
 	}, warnings)
@@ -303,7 +302,8 @@ func TestScanSelfRepositoryActions_RecursiveClosure(t *testing.T) {
 }
 
 func TestScanSelfRepositoryActions_NoRepoRoot(t *testing.T) {
-	scan := ScanSelfRepositoryActions(filepath.Join(t.TempDir(), "ci.yml"), []string{"$/actions/root"})
+	// Temporary directories may live inside an outer checkout in CI.
+	scan := ScanSelfRepositoryActions(filepath.Join(string(filepath.Separator), "gh-actions-lock-not-a-repository", "ci.yml"), []string{"$/actions/root"})
 
 	require.Len(t, scan.Errors, 1)
 	assert.Contains(t, scan.Errors[0], "not in a git repository")

@@ -82,10 +82,15 @@ func VerifyLocalCoverage(parsed []checks.ParsedWorkflow, store *lockfile.State) 
 				Remediation:  "fix the `$/…` action path so its dependencies can be inspected",
 			})
 		}
-
-		if len(pw.Refs) == 0 && len(pw.LocalPaths) == 0 {
-			results = append(results, wr)
-			continue
+		if len(pw.LocalPaths) > 0 {
+			wr.Findings = append(wr.Findings, checks.Finding{
+				WorkflowPath: pw.Path,
+				Category:     checks.LocalAction,
+				Severity:     checks.SeverityError,
+				Confidence:   checks.ConfidenceHigh,
+				Detail:       "cannot verify lockfile coverage for local path actions: " + strings.Join(pw.LocalPaths, ", "),
+				Remediation:  "inspect checkout and generated-file behavior before opting into --migrate-local-actions, or use remote action references",
+			})
 		}
 
 		// Use RunChecks with a nil resolver to get structural-only findings

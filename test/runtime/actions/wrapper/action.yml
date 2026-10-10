@@ -1,0 +1,41 @@
+name: Runtime smoke wrapper
+description: Checks a nested self-repository action resolves beside its defining action.
+
+inputs:
+  expected-marker:
+    description: Marker expected from the nested leaf action definition.
+    required: false
+    default: gh-actions-lock-runtime-leaf-v1
+
+outputs:
+  marker:
+    description: Marker embedded in the nested leaf definition.
+    value: ${{ steps.leaf.outputs.marker }}
+  source-path:
+    description: Path of the nested leaf definition supplied by the runner.
+    value: ${{ steps.leaf.outputs.source-path }}
+
+runs:
+  using: composite
+  steps:
+    - id: leaf
+      uses: $/test/runtime/actions/leaf
+      with:
+        expected-marker: ${{ inputs.expected-marker }}
+    - name: Check defining source
+      shell: bash
+      env:
+        WRAPPER_PATH: ${{ github.action_path }}
+        LEAF_PATH: ${{ steps.leaf.outputs.source-path }}
+        LEAF_MARKER: ${{ steps.leaf.outputs.marker }}
+      run: |
+        case "$WRAPPER_PATH" in
+          */test/runtime/actions/wrapper) ;;
+          *) printf 'Unexpected wrapper definition path: %s\n' "$WRAPPER_PATH" >&2; exit 1 ;;
+        esac
+        expected_path="${WRAPPER_PATH%/wrapper}/leaf"
+        if [ "$LEAF_PATH" != "$expected_path" ]; then
+          printf 'Nested action used %s; expected defining source %s\n' "$LEAF_PATH" "$expected_path" >&2
+          exit 1
+        fi
+        printf 'RUNTIME_SELF_REFERENCE_OK=%s\nRUNTIME_WRAPPER_PATH=%s\n' "$LEAF_MARKER" "$WRAPPER_PATH"

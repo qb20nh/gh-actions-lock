@@ -34,7 +34,7 @@ categories:
   - name: workflow_parsing
     description: "Workflow file parsing edge cases"
   - name: output_modes
-    description: "CLI flag combinations (--json, --no-fix, --rescan)"
+    description: "CLI flag combinations (--json, --no-fix, --verify)"
   - name: multi_workflow
     description: "Cross-workflow scenarios and dependency tracking"
   - name: security
@@ -86,7 +86,7 @@ scenarios:
       # v4 is a partial-semver pin: with narrowing on (default), the
       # version-ref nudge is the single actionable message (pin precisely,
       # which also earns live re-verification). The summary must NOT add a
-      # competing --rescan line, and must not resurrect the old "re-verify
+      # competing re-check line, and must not resurrect the old "re-verify
       # reachability" contradiction.
       output_contains: ["pinned without a full semver tag", "lock precisely"]
       output_excludes: ["trusted without a live check", "re-verify reachability"]
@@ -256,6 +256,7 @@ scenarios:
       output_contains:
         - "could not be resolved"
         - "nonexistent-org/nonexistent-action"
+        - "Run log:"
 
   - name: api_rate_limit_429
     category: api_errors
@@ -452,7 +453,7 @@ scenarios:
 
   - name: local_action_skipped
     category: workflow_parsing
-    description: "Local action (./path) — entire workflow skipped"
+    description: "Workspace-relative local action leaves coverage incomplete, while remote actions are still diagnosed; the run writes nothing"
     needs_token: true
     fixtures:
       workflows:
@@ -467,7 +468,8 @@ scenarios:
                   - uses: ./my-local-action
                   - uses: actions/checkout@v4
     expect:
-      exit: 0
+      exit: 1
+      output_contains: ["coverage is incomplete", "Nothing was written"]
 
   - name: local_action_onboarded_error
     category: workflow_parsing
@@ -488,7 +490,7 @@ scenarios:
       lockfile_template: pinned_checkout
     expect:
       exit: 1
-      output_contains: ["local path actions"]
+      output_contains: ["coverage is incomplete", "Nothing was written"]
 
   - name: composite_local_path_blocked
     category: workflow_parsing
@@ -518,9 +520,10 @@ scenarios:
 
   - name: migrate_local_actions_rewrite
     category: workflow_parsing
-    description: "migration runs by default on fix runs: rewrites a deep in-repo ./ chain to $/, then discovers, narrows and pins the remote dependency reached only through that $/ chain; no self repository ref enters the lockfile"
+    description: "Explicit --migrate-local-actions rewrites a deep in-repo ./ chain to $/, then discovers, narrows and pins its remote dependency through the compiled binary and stub API"
     needs_stub: true
     tags: [stub]
+    flags: ["--migrate-local-actions"]
     fixtures:
       workflows:
         ci.yml:
@@ -647,36 +650,6 @@ scenarios:
       stdout_is_json: true
       stdout_contains: ["findings"]
 
-  - name: rescan_mode
-    category: output_modes
-    description: "--rescan forces full re-verification"
-    needs_token: true
-    flags: ["--rescan"]
-    fixtures:
-      workflows:
-        ci.yml:
-          name: CI
-          actions: ["actions/checkout@v4"]
-    expect:
-      exit: 0
-      lockfile_deps_cover_direct: true
-
-  - name: rescan_inconclusive_fails
-    category: output_modes
-    description: "--rescan with SSO-blocked verification — fails, no 'All valid'"
-    needs_stub: true
-    tags: [stub]
-    flags: ["--rescan"]
-    fixtures:
-      workflows:
-        ci.yml:
-          name: CI
-          actions: ["actions/checkout@v4"]
-      lockfile_template: pinned_checkout
-    expect:
-      exit: 1
-      output_excludes: ["All", "valid"]
-
   - name: no_fix_json_combined
     category: output_modes
     description: "--no-fix --json combined produces JSON without modifying disk"
@@ -694,7 +667,7 @@ scenarios:
 
   - name: verify_fresh_unpinned
     category: output_modes
-    description: "--verify with unpinned deps — exits 1, read-only (equivalent to --rescan --no-fix)"
+    description: "--verify with unpinned deps — exits 1, read-only (equivalent to --no-fix)"
     needs_token: true
     flags: ["--verify"]
     fixtures:
@@ -704,7 +677,7 @@ scenarios:
           actions: ["actions/checkout@v4"]
     expect:
       exit: 1
-      output_contains: ["Re-run without --no-fix"]
+      output_contains: ["Re-run without --verify"]
 
   - name: verify_pinned_stub
     category: output_modes
@@ -819,11 +792,11 @@ scenarios:
       exit: 1
       output_contains: ["mutually exclusive"]
 
-  - name: verify_local_conflict_rescan
+  - name: verify_local_conflict_relock
     category: output_modes
-    description: "--verify-local --rescan is rejected — verify-local is offline"
+    description: "--verify-local --relock is rejected — verify-local is offline"
     needs_stub: false
-    flags: ["--verify-local", "--rescan"]
+    flags: ["--verify-local", "--relock"]
     fixtures:
       workflows:
         ci.yml:
@@ -931,19 +904,6 @@ scenarios:
     expect:
       exit: 1
       output_contains: ["could not be resolved"]
-
-  - name: resolution_record_shown
-    category: security
-    description: "Resolution record path is displayed after pin"
-    needs_stub: true
-    tags: [stub]
-    fixtures:
-      workflows:
-        ci.yml:
-          name: CI
-          actions: ["actions/checkout@v4"]
-    expect:
-      output_contains: ["Resolution record:"]
 
   - name: prefix_stripping
     category: security
@@ -1182,7 +1142,7 @@ scenarios:
 
   - name: local_action_skip_names_workflow
     category: workflow_parsing
-    description: "Local action skip message names the affected workflow file"
+    description: "Incomplete local-action coverage names the affected workflow file and blocks writes"
     needs_token: true
     fixtures:
       workflows:
@@ -1197,8 +1157,8 @@ scenarios:
                   - uses: ./.github/actions/setup
                   - uses: actions/checkout@v4
     expect:
-      exit: 0
-      output_contains: [".github/workflows/deploy.yml"]
+      exit: 1
+      output_contains: [".github/workflows/deploy.yml", "coverage is incomplete", "Nothing was written"]
 
   - name: self_repository_action_valid
     category: workflow_parsing
@@ -1244,17 +1204,25 @@ scenarios:
             jobs:
               call:
                 uses: $/.github/workflows/reusable.yml
+      files:
+        .github/workflows/reusable.yml: |
+          on: workflow_call
+          jobs:
+            build:
+              runs-on: ubuntu-latest
+              steps:
+                - run: echo ready
     expect:
       exit: 0
       output_contains: ["complete lockfile coverage"]
 
   - name: self_repository_action_missing
     category: workflow_parsing
-    description: "A missing in-repo $/ action is an unfixable invalid self repository ref, not a fixable not-pinned dependency. --no-migrate-local-actions opts out of the default migration pass so the real binary's verify-local diagnosis is what reports it."
+    description: "A missing in-repo $/ action is an unfixable invalid self repository reference during offline verification"
     needs_token: false
     needs_stub: false
     tags: [stub]
-    flags: ["--verify-local", "--no-migrate-local-actions"]
+    flags: ["--verify-local"]
     fixtures:
       workflows:
         ci.yml:
@@ -1268,15 +1236,15 @@ scenarios:
                   - uses: $/actions/missing
     expect:
       exit: 1
-      output_contains: ["can't inspect self repository action", "invalid-self-repository-ref"]
+      output_contains: ["can't inspect repository definition", "invalid-self-repository-ref"]
 
   - name: self_repository_ref_rejected
     category: workflow_parsing
-    description: "$/…@ref is rejected — a self repository reference always resolves to the running commit, so an explicit @ref is invalid. --no-migrate-local-actions opts out of the default migration pass so the real binary's verify-local diagnosis reports it."
+    description: "$/…@ref is rejected during offline verification because a self repository reference always resolves to the running commit"
     needs_token: false
     needs_stub: false
     tags: [stub]
-    flags: ["--verify-local", "--no-migrate-local-actions"]
+    flags: ["--verify-local"]
     fixtures:
       workflows:
         ci.yml:
@@ -1294,11 +1262,11 @@ scenarios:
 
   - name: self_repository_nested_ref_rejected
     category: workflow_parsing
-    description: "A $/…@ref nested inside an in-repo composite is rejected during local closure discovery, before any network resolution. --no-migrate-local-actions opts out of the default migration pass so the real binary's verify-local diagnosis reports it."
+    description: "A $/…@ref nested inside an in-repo composite is rejected during local closure discovery before network resolution"
     needs_token: false
     needs_stub: false
     tags: [stub]
-    flags: ["--verify-local", "--no-migrate-local-actions"]
+    flags: ["--verify-local"]
     fixtures:
       workflows:
         ci.yml:
@@ -1617,7 +1585,7 @@ scenarios:
 
   - name: partial_onboarding_counts_only_blocked_workflow
     category: multi_workflow
-    description: "Successful workflows are pinned while a blocked workflow stays untouched and is the only failure counted"
+    description: "An unresolved composite blocks the entire onboarding transaction; all workflow files stay unchanged and no lockfile is created"
     needs_token: true
     fixtures:
       workflows:
@@ -1638,18 +1606,10 @@ scenarios:
     expect:
       exit: 1
       output_contains:
-        - "Pinned 3 actions across 3 workflows"
-        - "1 of 4 workflows failed: 1 local-action"
+        - "Nothing was written"
+        - "local path actions"
       output_excludes:
-        - "4 of 4 workflows failed"
-        - "not-pinned"
-      lockfile_contains:
-        - "nodeselector/actions-test-fixtures@main"
-        - "nodeselector/actions-test-fixtures@updated"
-        - "nodeselector/actions-test-fixtures@v1"
-      lockfile_excludes:
-        - "blocked.yml"
-        - "nodeselector/actions-test-fixtures@tampered"
+        - "Pinned 3 actions across 3 workflows"
 
   # ═══════════════════════════════════════════════════════════════════════
   # CATEGORY: lockfile (additional scenarios)
@@ -1958,7 +1918,7 @@ scenarios:
         valid: true
   - name: dbot_transient_403_drops_pin
     category: dependabot
-    description: "SSO 403 on a previously-pinned action — pin retained, clean exit"
+    description: "SSO 403 on a previously-pinned action — pin retained, inconclusive parity warning, clean exit"
     needs_stub: true
     tags: [stub]
     flags: ["--no-onboard", "--no-narrow", "--no-interactive", "--json=valid,findings"]
@@ -1976,7 +1936,9 @@ scenarios:
         - expr: '.valid'
           equals: "true"
         - expr: '.findings | length'
-          equals: "0"
+          equals: "1"
+        - expr: '.findings[0].category'
+          equals: 'reachability-unknown'
 
       lockfile_contains:
         - "version: 'v0.0.2'"
@@ -1984,11 +1946,29 @@ scenarios:
         - "ref: 'v4'"
         - "commit: 'sha1-de0fac2e4500dabe0009e67214ff5f5447ce83dd'"
 
-      golden_json:
-        cli_version: (devel)
-        findings: []
-        lockfile_version: v0.0.2
-        valid: true
+  - name: dbot_renamed_repo_warns
+    category: dependabot
+    description: "Same-repo-ID rename reports a non-blocking repo-renamed finding in the JSON contract (Go tests cover the rewrite)"
+    needs_stub: true
+    tags: [stub]
+    flags: ["--no-onboard", "--no-narrow", "--no-interactive", "--no-fix", "--json=valid,findings"]
+    fixtures:
+      workflows:
+        ci.yml:
+          name: CI
+          actions: ["actions/checkout@v4"]
+      lockfile_template: pinned_checkout
+    expect:
+      exit: 0
+      stdout_is_json: true
+      jq:
+        - expr: '.valid'
+          equals: "true"
+        - expr: '.findings[0].category'
+          equals: 'repo-renamed'
+        - expr: '.findings[0].severity'
+          equals: 'warning'
+
   - name: dbot_impostor_blocks
     category: dependabot
     description: "Orphaned commit (no tag or branch) produces reachability-unknown warning in JSON findings"
@@ -2015,7 +1995,7 @@ scenarios:
     description: "Stale pin (lockfile SHA not reachable from the ref head) produces unreachable-pin/error finding"
     needs_stub: true
     tags: [stub]
-    flags: ["--no-onboard", "--no-narrow", "--no-interactive", "--rescan", "--json=valid,findings"]
+    flags: ["--no-onboard", "--no-narrow", "--no-interactive", "--relock", "--no-fix", "--json=valid,findings"]
     fixtures:
       workflows:
         ci.yml:
@@ -2133,6 +2113,8 @@ scenarios:
       exit: 0
       output_contains:
         - "pinned to a very recent tag with no Dependabot cooldown configured"
+      # A successful run saves a run log but doesn't print its path.
+      output_excludes: ["Run log:"]
 
   - name: fresh_tag_suppressed_by_cooldown
     category: cooldown

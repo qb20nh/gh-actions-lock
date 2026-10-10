@@ -210,3 +210,62 @@ func TestVerifyLocalCoverage_DepsError(t *testing.T) {
 	assert.True(t, report.Workflows[0].Findings[0].IsRemediableNotPinned())
 	assert.Contains(t, report.Workflows[0].Findings[0].Detail, "failed to read dependencies")
 }
+
+func TestVerifyLocalCoverage_LocalActionsAreIncomplete(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		refs    []parserlock.ActionRef
+		missing bool
+	}{
+		{name: "local action only"},
+		{name: "local and covered remote action", refs: []parserlock.ActionRef{{Owner: "actions", Repo: "checkout", Ref: "v4"}}},
+		{name: "local and uncovered remote action", refs: []parserlock.ActionRef{{Owner: "actions", Repo: "setup-go", Ref: "v5"}}, missing: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := writeTestLockfile(t, t.TempDir(), testLockfileContent)
+			report := VerifyLocalCoverage([]checks.ParsedWorkflow{{
+				Path: ".github/workflows/ci.yml", Refs: tc.refs, LocalPaths: []string{"./generated/action"},
+			}}, store)
+			assert.False(t, report.IsValid())
+			assert.Equal(t, 1, report.Workflows[0].CountByCategory(checks.LocalAction))
+			if tc.missing {
+				assert.Equal(t, 1, report.Workflows[0].CountByCategory(checks.NotPinned))
+			}
+		})
+	}
+}
+
+func TestVerifyLocalCoverage_MissingDependencyMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(parserlock.File)
+	}{
+		{
+			name: "missing direct metadata",
+			mutate: func(lf parserlock.File) {
+				delete(lf.Dependencies, "actions/checkout@v4")
+			},
+		},
+		{
+			name: "missing child metadata",
+			mutate: func(lf parserlock.File) {
+				action := lf.Dependencies["actions/checkout@v4"]
+				action.Uses = []string{"actions/setup-go@v5"}
+				lf.Dependencies["actions/checkout@v4"] = action
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := writeTestLockfile(t, t.TempDir(), testLockfileContent)
+			// LoadState rejects malformed files; exercise the verifier's own
+			// invariant if an in-memory graph becomes incomplete afterward.
+			tc.mutate(store.File())
+			report := VerifyLocalCoverage([]checks.ParsedWorkflow{{
+				Path: ".github/workflows/ci.yml",
+				Refs: []parserlock.ActionRef{{Owner: "actions", Repo: "checkout", Ref: "v4"}},
+			}}, store)
+			assert.False(t, report.IsValid())
+			assert.Equal(t, 1, report.Workflows[0].CountByCategory(checks.NotPinned))
+		})
+	}
+}

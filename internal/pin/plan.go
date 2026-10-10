@@ -3,8 +3,8 @@ package pin
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
-	"time"
 
 	parserlock "github.com/github/actions-lockfile/go/pkg/lockfile"
 	"github.com/github/gh-actions-lock/internal/dep"
@@ -24,7 +24,6 @@ type PlanOptions struct {
 	Pool      *pinpool.Pool
 	RepoOwner string // for same-owner narrowing skip
 	RepoName  string
-	Version   string // CLI version for the record
 	// NoNarrow disables tag narrowing: mutable version refs (v4, v3.1)
 	// are kept as the lock comment instead of being resolved to full
 	// patch tags (v4.2.1). Bare-SHA reverse lookup still applies.
@@ -61,10 +60,7 @@ type PlanOptions struct {
 // every pin action to take. It does network reads (resolve, reverse
 // lookup, reachability) but no disk writes.
 func Plan(ctx context.Context, report *checks.Report, opts PlanOptions) (*Record, error) {
-	rec := &Record{
-		Version: opts.Version,
-		Created: time.Now(),
-	}
+	rec := &Record{}
 
 	type indexedWR struct {
 		idx int
@@ -132,7 +128,13 @@ type planResult struct {
 	wplans  []WorkflowPlan
 }
 
-func planWorkflow(ctx context.Context, wr checks.WorkflowReport, opts PlanOptions, status func(string)) (planResult, error) {
+func planWorkflow(ctx context.Context, wr checks.WorkflowReport, opts PlanOptions, status func(string)) (result planResult, planErr error) {
+	defer func() {
+		for i := range result.wplans {
+			result.wplans[i].SourceContents = wr.SourceContents
+			result.wplans[i].SourcePaths = wr.SourcePaths
+		}
+	}()
 	var entries []Entry
 	var wplans []WorkflowPlan
 	if wr.SkipCommit || wr.BlockingResolverError {
@@ -177,7 +179,7 @@ func planWorkflow(ctx context.Context, wr checks.WorkflowReport, opts PlanOption
 	}
 
 	// Per-dep trust: recorded deps skip the network path.
-	unrecordedRefs, inventorySHA := partitionByInventory(inventory, wr.ActionRefs)
+	unrecordedRefs, inventoryTargets := partitionByInventory(inventory, wr.ActionRefs)
 	entries = verifiedEntries(inventory, wr.Path)
 
 	// A moved *transitive* dep is pruned from inventory but is not a direct
@@ -186,7 +188,7 @@ func planWorkflow(ctx context.Context, wr checks.WorkflowReport, opts PlanOption
 	// the workflow's direct roots through recursive resolution so the moved
 	// transitive is re-pinned to its current SHA.
 	if len(unrecordedRefs) == 0 && repinMoved {
-		unrecordedRefs, inventorySHA = partitionByInventory(nil, wr.ActionRefs)
+		unrecordedRefs, inventoryTargets = partitionByInventory(nil, wr.ActionRefs)
 		entries = verifiedEntries(nil, wr.Path)
 	}
 
@@ -225,6 +227,13 @@ func planWorkflow(ctx context.Context, wr checks.WorkflowReport, opts PlanOption
 	status("pinning " + wr.Path)
 	rewrites := make(map[string]string)
 	preservedDeps := make(map[int]bool)
+	for i, d := range deps {
+		// A direct use can also occur in an immutable remote manifest.
+		// Both callers need its original key, including when it is a SHA.
+		if len(parentMap[d.Key()]) > 0 {
+			preservedDeps[i] = true
+		}
+	}
 
 	narrowDirectDeps(ctx, opts, deps, rewriteTracker, rewrites, preservedDeps)
 
@@ -285,19 +294,29 @@ func planWorkflow(ctx context.Context, wr checks.WorkflowReport, opts PlanOption
 
 	// Record workflow plan if there are rewrites.
 	// Also narrow any verified (already-recorded) entries that have imprecise refs.
+	for i := range entries {
+		e := &entries[i]
+		for _, parent := range parentMap[e.NWO+"@"+e.Ref] {
+			if !slices.Contains(e.RequiredBy, parent) {
+				e.RequiredBy = append(e.RequiredBy, parent)
+			}
+		}
+	}
 	if verifiedRW := narrowVerifiedEntries(ctx, entries, opts, rewriteRefs); len(verifiedRW) > 0 {
 		for k, v := range verifiedRW {
 			rewrites[k] = v
 		}
 	}
+	required := transferRewrites(deps, rootTracker, wr.RewriteRefs, rewrites)
 	if err := rejectPartialSelfActionRewrites(opts, wr.SelfActionRefs, rewrites); err != nil {
 		return planResult{}, err
 	}
 	if len(rewrites) > 0 {
 		wplans = append(wplans, WorkflowPlan{
-			Path:            wr.Path,
-			Rewrites:        rewrites,
-			SelfActionFiles: wr.SelfActionFiles,
+			Path:             wr.Path,
+			Rewrites:         rewrites,
+			RequiredRewrites: required,
+			SelfActionFiles:  wr.SelfActionFiles,
 		})
 	} else if len(wplans) == 0 {
 		// Keep the workflow in the plan so its lockfile entry is updated.
@@ -305,12 +324,43 @@ func planWorkflow(ctx context.Context, wr checks.WorkflowReport, opts PlanOption
 	}
 
 	// Build entries for all pinned deps (skip any already emitted from inventory).
-	entries = append(entries, buildPinnedEntries(opts, wr, deps, parentMap, rootTracker, inventorySHA)...)
+	entries = append(entries, buildPinnedEntries(opts, wr, deps, parentMap, rootTracker, inventoryTargets)...)
 
 	// Record findings that are informational (ref-moved, misleading-sha).
 	entries = append(entries, informationalEntries(wr, opts)...)
 
 	return planResult{entries: entries, wplans: wplans}, nil
+}
+
+// transferRewrites moves each redirected root's `uses:` in this workflow
+// to the canonical repository.
+func transferRewrites(deps []dep.Dependency, rootTracker lockfile.DirectTracker, sources []parserlock.ActionRef, rewrites map[string]string) map[string]string {
+	written := make(map[string]bool, len(sources))
+	for _, ref := range sources {
+		written[ref.FullName()+"@"+ref.Ref] = true
+	}
+	var required map[string]string
+	for i, d := range deps {
+		if !rootTracker.IsDirect(i) {
+			continue
+		}
+		for _, ref := range d.OriginalRefs {
+			oldUse := ref.FullName() + "@" + ref.Ref
+			if !written[oldUse] {
+				continue
+			}
+			newUse := d.NWO
+			if ref.Path != "" {
+				newUse += "/" + ref.Path
+			}
+			if required == nil {
+				required = map[string]string{}
+			}
+			rewrites[oldUse] = newUse + "@" + d.Ref
+			required[oldUse] = rewrites[oldUse]
+		}
+	}
+	return required
 }
 
 func rejectPartialSelfActionRewrites(opts PlanOptions, selfActionRefs []parserlock.ActionRef, rewrites map[string]string) error {
@@ -339,11 +389,9 @@ func narrowDirectDeps(ctx context.Context, opts PlanOptions, deps []dep.Dependen
 	}
 	for i := range deps {
 		dep := &deps[i]
-		// Transitive deps come from a composite's action.yml; their ref
-		// is the composite author's choice and never appears in our
-		// workflow YAML. Narrowing it is pure churn and can invent refs
-		// the composite never declared, so leave it verbatim.
-		if !directTracker.IsDirect(i) {
+		// We cannot rewrite a remote manifest's declared ref, even when
+		// our workflow also references the same dependency directly.
+		if !directTracker.IsDirect(i) || preservedDeps[i] {
 			continue
 		}
 		owner, repo := dep.OwnerRepo()
@@ -404,9 +452,8 @@ func reverseLookupRewrites(ctx context.Context, opts PlanOptions, wr checks.Work
 		}
 	}
 
-	// Snapshot transitive deps' declared refs before ReverseLookup mutates
-	// them. We restore symbolic refs (tags/branches) afterward but let
-	// ReverseLookup's discovered ref stick when the original is a bare SHA.
+	// Remote callers still require their declared ref after reverse lookup;
+	// discovered tags and branches enrich metadata without changing that key.
 	transitiveOrigRefs := make(map[int]string)
 	for i := range deps {
 		if !directTracker.IsDirect(i) {
@@ -451,8 +498,8 @@ func reverseLookupRewrites(ctx context.Context, opts PlanOptions, wr checks.Work
 
 // buildPinnedEntries emits an entry for every resolved dep, marking it Verified
 // when the lockfile already records the same SHA and Pinned otherwise. Deps
-// already emitted from inventory (by NWO:SHA) are skipped.
-func buildPinnedEntries(opts PlanOptions, wr checks.WorkflowReport, deps []dep.Dependency, parentMap dep.ParentMap, directTracker lockfile.DirectTracker, inventorySHA map[string]bool) []Entry {
+// already emitted from inventory with the same identity and SHA are skipped.
+func buildPinnedEntries(opts PlanOptions, wr checks.WorkflowReport, deps []dep.Dependency, parentMap dep.ParentMap, directTracker lockfile.DirectTracker, inventoryTargets map[string]bool) []Entry {
 	// Load existing lockfile state so re-runs are noops for unchanged deps.
 	existingSHA := make(map[string]string) // NWO@Ref -> SHA
 	if opts.Store != nil {
@@ -467,8 +514,7 @@ func buildPinnedEntries(opts PlanOptions, wr checks.WorkflowReport, deps []dep.D
 	directKeys := directTracker.Keys(deps)
 	var out []Entry
 	for _, dep := range deps {
-		nwoSHA := strings.ToLower(dep.NWO) + ":" + strings.ToLower(dep.SHA)
-		if inventorySHA[nwoSHA] {
+		if inventoryTargets[inventoryTarget(dep)] {
 			continue // already emitted as Verified from inventory
 		}
 		depKey := dep.Key()
@@ -488,6 +534,9 @@ func buildPinnedEntries(opts PlanOptions, wr checks.WorkflowReport, deps []dep.D
 			Workflows:  []string{wr.Path},
 			RequiredBy: parents,
 			Direct:     directKeys[depKey],
+		}
+		for _, orig := range dep.OriginalRefs {
+			entry.RenamedFrom = append(entry.RenamedFrom, orig.NWO()+"@"+orig.Ref)
 		}
 		out = append(out, entry)
 	}
@@ -539,14 +588,14 @@ func informationalEntry(f checks.Finding, path string) Entry {
 
 // partitionByInventory splits refs into those with a matching inventory
 // entry (recorded) and those without (unrecorded). Returns the unrecorded
-// refs and an NWO:SHA index for deduplicating resolved deps later.
-func partitionByInventory(inventory []checks.InventoryEntry, refs []parserlock.ActionRef) (unrecorded []parserlock.ActionRef, shaSeen map[string]bool) {
+// refs and a target index for deduplicating resolved deps later.
+func partitionByInventory(inventory []checks.InventoryEntry, refs []parserlock.ActionRef) (unrecorded []parserlock.ActionRef, targets map[string]bool) {
 	byKey := make(map[string]bool, len(inventory))
-	shaSeen = make(map[string]bool, len(inventory))
+	targets = make(map[string]bool, len(inventory))
 	for _, inv := range inventory {
 		nwo := strings.ToLower(inv.Dep.NWO)
 		byKey[nwo+"@"+inv.Dep.Ref] = true
-		shaSeen[nwo+":"+strings.ToLower(inv.Dep.SHA)] = true
+		targets[inventoryTarget(inv.Dep)] = true
 	}
 	for _, ref := range refs {
 		key := strings.ToLower(ref.Owner+"/"+ref.Repo) + "@" + ref.Ref
@@ -554,14 +603,27 @@ func partitionByInventory(inventory []checks.InventoryEntry, refs []parserlock.A
 			unrecorded = append(unrecorded, ref)
 		}
 	}
-	return unrecorded, shaSeen
+	return unrecorded, targets
+}
+
+func inventoryTarget(d dep.Dependency) string {
+	hostname := d.Hostname
+	if hostname == "" {
+		hostname = "github.com"
+	}
+	ref := d.Ref
+	if parserlock.IsFullSha(ref) {
+		ref = strings.ToLower(ref)
+	}
+	return strings.ToLower(hostname+"/"+d.NWO) + "@" + ref + ":" + strings.ToLower(d.SHA)
 }
 
 // pruneStaleInventory drops inventory entries matching a stale finding (a pin
 // the workflow no longer references), so a fix-mode re-pin converges.
 // acceptMoved additionally prunes ref-moved and unreachable-pin deps; relock
 // prunes ref-moved deps only, so a benign branch/version advance can be
-// re-pinned without accepting a possibly-tampered unreachable pin.
+// re-pinned without accepting a possibly-tampered unreachable pin. A
+// same-ID redirect is pruned so it re-resolves under the canonical name.
 func pruneStaleInventory(inventory []checks.InventoryEntry, findings []checks.Finding, acceptMoved, relock bool) []checks.InventoryEntry {
 	stale := make(map[string]bool)
 	for _, f := range findings {
@@ -570,19 +632,20 @@ func pruneStaleInventory(inventory []checks.InventoryEntry, findings []checks.Fi
 			continue
 		case f.Category == checks.Stale,
 			f.Category == checks.UnreachablePin && acceptMoved,
-			f.Category == checks.RefMoved && (acceptMoved || relock):
+			f.Category == checks.RefMoved && (acceptMoved || relock),
+			f.Category == checks.RepoRenamed && f.Severity == checks.SeverityWarning:
 		default:
 			continue
 		}
 		d := f.Dependency
-		stale[strings.ToLower(d.NWO+"@"+d.Ref+":"+d.SHA)] = true
+		stale[inventoryTarget(*d)] = true
 	}
 	if len(stale) == 0 {
 		return inventory
 	}
 	out := make([]checks.InventoryEntry, 0, len(inventory))
 	for _, inv := range inventory {
-		key := strings.ToLower(inv.Dep.NWO + "@" + inv.Dep.Ref + ":" + inv.Dep.SHA)
+		key := inventoryTarget(inv.Dep)
 		if stale[key] {
 			continue
 		}
@@ -618,7 +681,7 @@ func verifiedEntries(inventory []checks.InventoryEntry, path string) []Entry {
 
 // narrowVerifiedEntries upgrades already-recorded direct deps to full semver
 // tags when possible, returning the workflow-YAML rewrites. Skipped for
-// --no-narrow, transitive deps, and refs the user kept imprecise (sticky v4).
+// --no-narrow, entries with remote parents, and refs the user kept imprecise.
 func narrowVerifiedEntries(ctx context.Context, entries []Entry, opts PlanOptions, rewriteRefs []parserlock.ActionRef) map[string]string {
 	if opts.NoNarrow || opts.Tagger == nil {
 		return nil
@@ -627,7 +690,7 @@ func narrowVerifiedEntries(ctx context.Context, entries []Entry, opts PlanOption
 	rewrites := make(map[string]string)
 	for i := range entries {
 		e := &entries[i]
-		if !e.Direct {
+		if !e.Direct || len(e.RequiredBy) > 0 {
 			continue
 		}
 		if !rewriteRefKeys[strings.ToLower(e.NWO)+"@"+e.Ref] {

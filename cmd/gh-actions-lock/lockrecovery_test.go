@@ -90,7 +90,7 @@ func TestNewLockRecovery(t *testing.T) {
 		}
 	})
 
-	t.Run("interactive confirm yes deletes and recovers", func(t *testing.T) {
+	t.Run("interactive confirm stages recovery and preserves original", func(t *testing.T) {
 		lock := writeScratchLock(t)
 		fc := &fakeConfirmer{result: true}
 		rec := newLockRecovery(false, discardUI(), func() (confirmer, bool) { return fc, true }, true)
@@ -102,8 +102,12 @@ func TestNewLockRecovery(t *testing.T) {
 		if !fc.called {
 			t.Error("confirmer should have been consulted")
 		}
-		if fileExists(t, lock) {
-			t.Error("lockfile should have been deleted")
+		content, readErr := os.ReadFile(lock)
+		if readErr != nil {
+			t.Fatalf("reading original lockfile after confirmation: %v", readErr)
+		}
+		if string(content) != "corrupt" {
+			t.Error("confirmation must preserve original lockfile bytes until commit")
 		}
 	})
 
