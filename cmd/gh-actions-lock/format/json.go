@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/github/gh-actions-lock/internal/ghapi"
@@ -310,11 +311,7 @@ func pinsFromRecord(record *pin.Record, report *checks.Report) []Pin {
 				checked[key] = true
 			}
 		}
-		if _, ok := index[key]; ok {
-			continue
-		}
-		index[key] = len(pins)
-		pins = append(pins, Pin{
+		p := Pin{
 			Hostname:     e.Hostname,
 			NWO:          e.NWO,
 			Ref:          e.Ref,
@@ -324,10 +321,31 @@ func pinsFromRecord(record *pin.Record, report *checks.Report) []Pin {
 			NarrowedFrom: e.AutoFixedRef,
 			ObservedSHA:  e.ObservedSHA,
 			Reason:       e.Reason,
-		})
+		}
+		if i, ok := index[key]; ok {
+			current := &pins[i]
+			applied := current.Applied || p.Applied
+			narrowedFrom := max(current.NarrowedFrom, p.NarrowedFrom)
+			priority, currentPriority := pinOutcomePriority(p), pinOutcomePriority(*current)
+			// Keep the diagnosis with the dominant outcome. Equal outcomes
+			// choose a stable diagnosis rather than depending on workflow order.
+			diagnosisOrder := slices.Compare(
+				[]string{p.Reason, p.ObservedSHA, p.SHA, p.Hostname, p.NWO},
+				[]string{current.Reason, current.ObservedSHA, current.SHA, current.Hostname, current.NWO},
+			)
+			if priority > currentPriority || priority == currentPriority && diagnosisOrder > 0 {
+				*current = p
+			}
+			current.Applied = applied
+			current.NarrowedFrom = narrowedFrom
+			continue
+		}
+		index[key] = len(pins)
+		pins = append(pins, p)
 	}
 	for _, i := range index {
-		if !record.Committed && (pins[i].Outcome == pin.Pinned.String() || pins[i].NarrowedFrom != "") {
+		if !record.Committed && (pins[i].Outcome == pin.Pinned.String() ||
+			pins[i].Outcome == pin.Verified.String() && pins[i].NarrowedFrom != "") {
 			pins[i].Outcome = "planned"
 		}
 	}
@@ -338,4 +356,22 @@ func pinsFromRecord(record *pin.Record, report *checks.Report) []Pin {
 		}
 	}
 	return pins
+}
+
+func pinOutcomePriority(p Pin) int {
+	switch p.Outcome {
+	case pin.Unresolved.String():
+		return 5
+	case pin.Investigate.String():
+		return 4
+	case pin.Pinned.String():
+		return 3
+	case pin.Verified.String():
+		if p.NarrowedFrom != "" {
+			return 2
+		}
+		return 1
+	default:
+		return 0
+	}
 }

@@ -131,3 +131,124 @@ func TestPinsFromRecord_DistinguishesPlannedFromApplied(t *testing.T) {
 		})
 	}
 }
+
+func TestPinsFromRecordMergesDuplicateOutcomes(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		committed    bool
+		entries      []pin.Entry
+		outcome      string
+		applied      bool
+		sha          string
+		narrowedFrom string
+		observedSHA  string
+		reason       string
+	}{
+		{
+			name: "applied pin overrides verified", committed: true,
+			entries: []pin.Entry{{Resolution: pin.Verified, SHA: "old"}, {Resolution: pin.Pinned, SHA: "new"}},
+			outcome: "pinned", applied: true, sha: "new",
+		},
+		{
+			name:    "planned pin overrides verified",
+			entries: []pin.Entry{{Resolution: pin.Verified, SHA: "old"}, {Resolution: pin.Pinned, SHA: "new"}},
+			outcome: "planned", sha: "new",
+		},
+		{
+			name: "applied narrowing overrides unchanged", committed: true,
+			entries: []pin.Entry{{Resolution: pin.Verified}, {Resolution: pin.Verified, AutoFixedRef: "v1", Reason: "narrowed to patch tag"}},
+			outcome: "verified", applied: true, narrowedFrom: "v1", reason: "narrowed to patch tag",
+		},
+		{
+			name:    "planned narrowing overrides unchanged",
+			entries: []pin.Entry{{Resolution: pin.Verified}, {Resolution: pin.Verified, AutoFixedRef: "v1", Reason: "narrowed to patch tag"}},
+			outcome: "planned", narrowedFrom: "v1", reason: "narrowed to patch tag",
+		},
+		{
+			name: "pin retains another workflow's narrowing", committed: true,
+			entries: []pin.Entry{{Resolution: pin.Pinned, SHA: "new"}, {Resolution: pin.Verified, SHA: "new", AutoFixedRef: "v1"}},
+			outcome: "pinned", applied: true, sha: "new", narrowedFrom: "v1",
+		},
+		{
+			name: "investigation retains applied change", committed: true,
+			entries: []pin.Entry{
+				{Resolution: pin.Pinned, SHA: "new"},
+				{Resolution: pin.Investigate, SHA: "old", ObservedSHA: "moved", Reason: "ref moved"},
+			},
+			outcome: "needs-investigation", applied: true, sha: "old", observedSHA: "moved", reason: "ref moved",
+		},
+		{
+			name: "unresolved is not hidden by planned narrowing",
+			entries: []pin.Entry{
+				{Resolution: pin.Verified, AutoFixedRef: "v1"},
+				{Resolution: pin.Unresolved, Reason: "resolution failed"},
+			},
+			outcome: "unresolved", narrowedFrom: "v1", reason: "resolution failed",
+		},
+		{
+			name:    "verified overrides skipped",
+			entries: []pin.Entry{{Resolution: pin.Skipped, Reason: "workflow skipped"}, {Resolution: pin.Verified}},
+			outcome: "verified",
+		},
+		{
+			name: "unresolved overrides investigation",
+			entries: []pin.Entry{
+				{Resolution: pin.Investigate, ObservedSHA: "moved", Reason: "ref moved"},
+				{Resolution: pin.Unresolved, Reason: "resolution failed"},
+			},
+			outcome: "unresolved", reason: "resolution failed",
+		},
+		{
+			name: "equal outcomes retain diagnosis",
+			entries: []pin.Entry{
+				{Resolution: pin.Investigate},
+				{Resolution: pin.Investigate, ObservedSHA: "moved", Reason: "ref moved"},
+			},
+			outcome: "needs-investigation", observedSHA: "moved", reason: "ref moved",
+		},
+		{
+			name: "equal diagnoses retain observed SHA",
+			entries: []pin.Entry{
+				{Resolution: pin.Investigate, Reason: "ref moved"},
+				{Resolution: pin.Investigate, ObservedSHA: "moved", Reason: "ref moved"},
+			},
+			outcome: "needs-investigation", observedSHA: "moved", reason: "ref moved",
+		},
+		{
+			name:    "equal outcomes choose a stable SHA",
+			entries: []pin.Entry{{Resolution: pin.Verified, SHA: "aaa"}, {Resolution: pin.Verified, SHA: "bbb"}},
+			outcome: "verified", sha: "bbb",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, reverse := range []bool{false, true} {
+				entries := append([]pin.Entry(nil), tt.entries...)
+				workflowPaths := []string{"ci.yml", "release.yml"}
+				for i := range entries {
+					entries[i].Hostname = "github.com"
+					entries[i].NWO = "owner/action"
+					entries[i].Ref = "v1.2.3"
+					entries[i].Workflows = []string{workflowPaths[i]}
+				}
+				if reverse {
+					entries[0], entries[1] = entries[1], entries[0]
+				}
+				var out bytes.Buffer
+				record := &pin.Record{Committed: tt.committed, Entries: entries}
+				require.NoError(t, WriteJSON(&out, &checks.Report{}, record, true, "pins", "dev", "v0.0.3", "github.com"))
+				var payload struct {
+					Pins []Pin `json:"pins"`
+				}
+				require.NoError(t, json.Unmarshal(out.Bytes(), &payload))
+				got := payload.Pins
+				require.Len(t, got, 1)
+				assert.Equal(t, tt.outcome, got[0].Outcome, "reverse=%t", reverse)
+				assert.Equal(t, tt.applied, got[0].Applied, "reverse=%t", reverse)
+				assert.Equal(t, tt.sha, got[0].SHA, "reverse=%t", reverse)
+				assert.Equal(t, tt.narrowedFrom, got[0].NarrowedFrom, "reverse=%t", reverse)
+				assert.Equal(t, tt.observedSHA, got[0].ObservedSHA, "reverse=%t", reverse)
+				assert.Equal(t, tt.reason, got[0].Reason, "reverse=%t", reverse)
+			}
+		})
+	}
+}

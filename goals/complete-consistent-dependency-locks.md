@@ -7,7 +7,7 @@ Deliver reviewable fixes so verification reports dependency coverage accurately,
 - **Status:** CLI implementation and the repository-controlled #125 workaround combo are implemented and tested. M6 remains open for upstream runtime rejection and deployment of repository protections.
 - **Progress:** 5 of 6 milestones complete.
 - **Last validated:** 2026-10-11 KST.
-- **Delivery:** [Draft implementation PR](https://github.com/qb20nh/gh-actions-lock/pull/2), [workaround branch](https://github.com/qb20nh/gh-actions-lock/tree/codex/m6/combo-20261011), [published release evidence](https://github.com/qb20nh/gh-actions-lock/tree/codex/m6/evidence-combo-20261011), and 12 attested draft prerelease binaries from `a23bb9b0d13aad17565ca53d8436f6959acaff6b`. Upstream merge remains separate.
+- **Delivery:** [Implementation PR](https://github.com/qb20nh/gh-actions-lock/pull/2), [workaround branch](https://github.com/qb20nh/gh-actions-lock/tree/codex/m6/combo-20261011), [published release evidence](https://github.com/qb20nh/gh-actions-lock/tree/codex/m6/evidence-combo-20261011), and 12 attested draft prerelease binaries from `a23bb9b0d13aad17565ca53d8436f6959acaff6b`. Upstream merge remains separate.
 - **Execution order:** M1 → M2 → M3 → M4 → M5 → M6.
 
 ## Milestones
@@ -104,7 +104,7 @@ Deliver reviewable fixes so verification reports dependency coverage accurately,
   - [x] Validate real PR head and merge status binding through the hosted policy-script harness; all 103 scenarios pass in the corrected live catalog.
   - [x] Build 12 attested binaries through the vendored composite and verify the uploaded Linux binary's digest, source attestation, frozen graph and missing-lock rejection.
   - [ ] Deploy the policy on the default branch, verify actual PRtarget and merge-group delivery, and apply required checks, SHA policy, and exact allowlist with an administration credential. Current connector/shell capabilities cannot apply settings.
-  - [ ] Enable Dependency graph in the fork and rerun the blocking dependency-review check; its lock gate passes but the review API currently returns 403.
+  - [x] Confirm the fork's dependency-review API is available: the [rerun](https://github.com/qb20nh/gh-actions-lock/actions/runs/38066247251) passed both its lock gate and dependency review after the initial 403.
   - [ ] Re-run platform malformed-lock rejection after the upstream #125 fix; require an explicit lock error and no execution sentinel.
 
   Repository gating mitigates #125 for the covered consumers. It does not replace the original platform-enforcement completion criterion or claim to freeze arbitrary container images and shell downloads.
@@ -122,6 +122,13 @@ Targeted deterministic probes reproduced the code-scan findings. Some probes ass
 The assessment environment initially lacked a clean full-suite baseline: synthetic parent `.git` directories affected temporary-repository fixtures, and sandbox restrictions prevented local HTTP test servers. Final checks used the prepared Go 1.25.8 toolchain, isolated fixture directories under `/dev/shm`, executable Go build temporary files under `/tmp`, and permitted localhost networking.
 
 ## Final validation evidence
+
+The four P2 findings from PR #2 are fixed and covered by regressions that failed
+before their fixes: migration follows selected reusable workflows, parity findings
+preserve tenant and public fallback hosts, the hook builds staged verifier source,
+and JSON combines duplicate outcomes independent of workflow order. The updated
+race/release suite, five materializer tests, 12 protection/hook tests, formatting,
+vet, and all 34 stub scenarios pass. [Review validation log](/workspace/.cloud-setup/gh-actions-lock/review-p2-checks.log).
 
 All checks below passed after the final CLI changes:
 

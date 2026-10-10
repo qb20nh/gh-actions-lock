@@ -261,5 +261,37 @@ class HookSnapshotTests(unittest.TestCase):
                 self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
 
 
+@unittest.skipUnless(shutil.which("git") and shutil.which("go"), "hook checks need git and Go")
+class HookBuildSnapshotTests(unittest.TestCase):
+    def test_verifier_is_built_from_partially_staged_source(self):
+        repository = Path(__file__).resolve().parent.parent
+        for staged_valid in (False, True):
+            with self.subTest(staged_valid=staged_valid), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "script").mkdir()
+                shutil.copy(repository / "script/materialize-git-tree", root / "script/materialize-git-tree")
+                command = root / "cmd/gh-actions-lock"
+                command.mkdir(parents=True)
+                (root / "go.mod").write_text("module hook-test\n\ngo 1.22\n")
+
+                def source(valid):
+                    value = "true" if valid else "false"
+                    return ('package main\nimport ("fmt"; "os")\nfunc main() {\n'
+                            'fmt.Println(`{"valid":' + value + ',"dependencies":[]}`)\n'
+                            'if !' + value + ' { os.Exit(1) }\n}\n')
+
+                main = command / "main.go"
+                main.write_text(source(staged_valid))
+                subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+                subprocess.run(["git", "add", "."], cwd=root, check=True)
+                main.write_text(source(not staged_valid))
+                env = os.environ | {"GH_ACTIONS_LOCK_VERIFY_FROZEN": "0", "GOWORK": "off"}
+                result = subprocess.run([str(repository / ".githooks/pre-commit")], cwd=root,
+                                        env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0 if staged_valid else 1, result.stdout + result.stderr)
+                if not staged_valid:
+                    self.assertFalse(json.loads(result.stderr)["valid"])
+
+
 if __name__ == "__main__":
     unittest.main()

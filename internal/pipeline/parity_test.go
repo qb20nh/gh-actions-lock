@@ -88,7 +88,7 @@ func TestParityFinding(t *testing.T) {
 				Parent: tt.parent,
 			}
 			ref := parserlock.ActionRef{Owner: lp.Pin.Owner, Repo: lp.Pin.Repo, Ref: tt.ref}
-			f, ok := parityFinding(checks.ParsedWorkflow{Path: ".github/workflows/ci.yml"}, ref, lp, pin(tt.ref), tt.state)
+			f, ok := parityFinding(checks.ParsedWorkflow{Path: ".github/workflows/ci.yml"}, ref, lp, pin(tt.ref), tt.state, "github.com")
 			if tt.want == "" {
 				assert.False(t, ok, "unexpected finding: %+v", f)
 				return

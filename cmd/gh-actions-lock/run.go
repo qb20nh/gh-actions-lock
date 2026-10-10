@@ -637,7 +637,7 @@ func cliVersion() string {
 }
 
 // migrateLocalActions rewrites selected workflows and their reachable local
-// action sources. The undo function restores original contents and modes.
+// workflow and action sources. The undo function restores contents and modes.
 func migrateLocalActions(paths []string) (int, func() error, error) {
 	var written []plannedMigration
 	undo := func() error {
@@ -652,7 +652,7 @@ func migrateLocalActions(paths []string) (int, func() error, error) {
 	}
 	files := append([]string(nil), paths...)
 
-	// Follow only selected sources, including nested same-repository actions.
+	// Follow selected sources through local workflows and same-repository actions.
 	seenSources := map[string]bool{}
 	for i := 0; i < len(files); i++ {
 		path := files[i]
@@ -674,6 +674,11 @@ func migrateLocalActions(paths []string) (int, func() error, error) {
 			refs = append(refs, "$/"+strings.TrimPrefix(local, "./"))
 		}
 		if root := workflowfile.FindRepoRoot(path); root != "" {
+			workflowScan := workflowfile.ScanSelfRepositoryActions(path, nil, scan.LocalWorkflowRefs...)
+			if len(workflowScan.Errors) > 0 {
+				return 0, undo, fmt.Errorf("refusing to migrate local reusable workflows in %s: %s", path, workflowScan.Errors[0])
+			}
+			files = append(files, workflowScan.ActionFiles...)
 			for _, ref := range refs {
 				actionDir := filepath.Join(root, strings.TrimPrefix(ref, "$/"))
 				for _, name := range []string{"action.yml", "action.yaml"} {

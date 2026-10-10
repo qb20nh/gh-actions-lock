@@ -106,7 +106,7 @@ func checkParity(ctx context.Context, r *resolve.Resolver, parsed []checks.Parse
 	}
 	for i, st := range states {
 		for _, o := range owners[i] {
-			f, ok := parityFinding(o.pw, o.ref, o.lp, pins[i], st)
+			f, ok := parityFinding(o.pw, o.ref, o.lp, pins[i], st, r.Hostname())
 			switch {
 			case ok && o.fresh && st.Err != nil:
 				f.Severity = checks.SeverityError
@@ -169,7 +169,7 @@ func freshClosure(resolved []dep.Dependency, parents map[string][]string) func(c
 			owner, repo := d.OwnerRepo()
 			o := parityOwner{pw: pw, fresh: true, ref: ref, lp: lockfile.LockedPin{
 				Pin:    parserlock.Pin{NWO: d.NWO, Owner: owner, Repo: repo, Ref: d.Ref},
-				Action: parserlock.Action{Commit: d.SHA},
+				Action: parserlock.Action{Hostname: d.Hostname, Commit: d.SHA},
 				Parent: parent,
 			}}
 			out = append(out, o)
@@ -191,12 +191,16 @@ func freshClosure(resolved []dep.Dependency, parents map[string][]string) func(c
 	}
 }
 
-func parityFinding(pw checks.ParsedWorkflow, ref parserlock.ActionRef, lp lockfile.LockedPin, pc ghapi.PinCheck, st ghapi.PinState) (checks.Finding, bool) {
+func parityFinding(pw checks.ParsedWorkflow, ref parserlock.ActionRef, lp lockfile.LockedPin, pc ghapi.PinCheck, st ghapi.PinState, homeHost string) (checks.Finding, bool) {
 	nwo := pc.Owner + "/" + pc.Repo
+	hostname := lp.Action.Hostname
+	if hostname == "" {
+		hostname = homeHost
+	}
 	f := checks.Finding{
 		WorkflowPath: pw.Path,
 		ActionRef:    &ref,
-		Dependency:   &dep.Dependency{NWO: nwo, Path: ref.Path, Ref: lp.Pin.Ref, SHA: pc.SHA},
+		Dependency:   &dep.Dependency{Hostname: hostname, NWO: nwo, Path: ref.Path, Ref: lp.Pin.Ref, SHA: pc.SHA},
 		Severity:     checks.SeverityError,
 		Confidence:   checks.ConfidenceHigh,
 	}

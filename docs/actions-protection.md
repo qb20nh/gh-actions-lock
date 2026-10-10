@@ -66,9 +66,9 @@ signatures, and repository settings remain in place. A disabled Actions setting
 or an existing local-only policy stops setup for explicit review.
 
 Enable Dependency graph under repository Code security before requiring the
-dependency-review check. The fork's lock gate passes, but the review API currently
-returns 403 and the action reports that the feature is unavailable. The review
-check remains blocking until the feature is enabled and the check is rerun.
+dependency-review check. The fork's initial review API request returned 403; its
+[rerun](https://github.com/qb20nh/gh-actions-lock/actions/runs/38066247251)
+now completes successfully. The review check remains blocking.
 
 When the verifier or raw-tree helper changes, publish and test a new immutable
 bootstrap commit, then update `LOCK_VERIFIER_SHA` in both validator workflows.
@@ -106,7 +106,7 @@ GitHub Actions app does not distinguish two workflows using that app.
 git config --local core.hooksPath .githooks
 ```
 
-The pre-commit hook builds the current verifier and checks the exact staged
+The pre-commit hook builds the verifier from the exact staged tree and checks its
 workflow/lock snapshot with `--require-lockfile --verify-local`, including
 partially staged files, and requires full-SHA refs matching their recorded commits
 throughout the inspected inventory. This offline check cannot discover remote

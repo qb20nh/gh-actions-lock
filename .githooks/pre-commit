@@ -12,8 +12,8 @@ mkdir "$hook_tmp/candidate"
 "$repo_root/script/materialize-git-tree" "$repo_root" "$staged_tree" "$hook_tmp/candidate"
 mkdir "$hook_tmp/candidate/.git"
 
-go build -mod=readonly -o "$hook_tmp/gh-actions-lock" ./cmd/gh-actions-lock
 cd "$hook_tmp/candidate"
+GOWORK=off go build -mod=readonly -buildvcs=false -o "$hook_tmp/gh-actions-lock" ./cmd/gh-actions-lock
 if ! "$hook_tmp/gh-actions-lock" --hostname github.com --require-lockfile --verify-local \
     --json=valid,findings,dependencies > "$hook_tmp/verification.json"; then
   cat "$hook_tmp/verification.json" >&2

@@ -140,6 +140,103 @@ func TestMigrateLocalActions_LeavesUnrelatedFilesUnchanged(t *testing.T) {
 	}
 }
 
+func TestMigrateLocalActions_SelectedReusableWorkflow(t *testing.T) {
+	for _, prefix := range []string{"./", "$/"} {
+		t.Run(prefix, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Chdir(dir)
+			require.NoError(t, os.Mkdir(".git", 0o755))
+			files := map[string]string{
+				".github/workflows/selected.yml": "jobs:\n  reuse:\n    uses: " + prefix + ".github/workflows/reuse.yml\n",
+				".github/workflows/reuse.yml":    "jobs:\n  nested:\n    uses: $/.github/workflows/nested.yaml\n",
+				".github/workflows/nested.yaml":  "jobs:\n  build:\n    steps:\n      - uses: ./actions/foo\n",
+				"actions/foo/action.yml":         "runs:\n  using: composite\n  steps:\n    - uses: ./actions/helper\n",
+				"actions/helper/action.yaml":     "runs:\n  using: composite\n  steps:\n    - run: echo helper\n      shell: bash\n",
+				".github/workflows/other.yml":    "jobs:\n  build:\n    steps:\n      - uses: ./actions/foo\n",
+			}
+			for path, content := range files {
+				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+				require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+			}
+
+			transport := &requestCountingTransport{}
+			stdout, _, err := runCommandWithHTTP(t, transport, "--migrate-local-actions", "--json=valid", ".github/workflows/selected.yml")
+
+			require.NoError(t, err, "selected callers must migrate local actions in their reusable-workflow closure")
+			var output struct {
+				Valid bool `json:"valid"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(stdout), &output))
+			assert.True(t, output.Valid)
+			assert.Zero(t, transport.calls.Load(), "repository-owned definitions need no GitHub requests")
+			for path, want := range map[string]string{
+				".github/workflows/selected.yml": files[".github/workflows/selected.yml"],
+				".github/workflows/reuse.yml":    files[".github/workflows/reuse.yml"],
+				".github/workflows/nested.yaml":  strings.ReplaceAll(files[".github/workflows/nested.yaml"], "./actions/foo", "$/actions/foo"),
+				"actions/foo/action.yml":         strings.ReplaceAll(files["actions/foo/action.yml"], "./actions/helper", "$/actions/helper"),
+				".github/workflows/other.yml":    files[".github/workflows/other.yml"],
+			} {
+				got, err := os.ReadFile(path)
+				require.NoError(t, err)
+				assert.Equal(t, want, string(got), path)
+			}
+			assert.FileExists(t, ".github/workflows/actions.lock", "complete coverage permits committing the generated lock")
+		})
+	}
+}
+
+func TestMigrateLocalActions_RejectsReusableWorkflowCycleBeforeWriting(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	require.NoError(t, os.Mkdir(".git", 0o755))
+	files := map[string]string{
+		".github/workflows/selected.yml": "jobs:\n  reuse:\n    uses: ./.github/workflows/reuse.yml\n",
+		".github/workflows/reuse.yml":    "jobs:\n  cycle:\n    uses: ./.github/workflows/selected.yml\n  build:\n    steps:\n      - uses: ./actions/foo\n",
+		"actions/foo/action.yml":         "runs:\n  using: composite\n  steps:\n    - run: echo foo\n      shell: bash\n",
+	}
+	for path, content := range files {
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+	}
+
+	count, _, err := migrateLocalActions([]string{".github/workflows/selected.yml"})
+
+	require.ErrorContains(t, err, "local reusable workflow cycle")
+	assert.Zero(t, count)
+	for path, want := range files {
+		got, err := os.ReadFile(path)
+		require.NoError(t, err)
+		assert.Equal(t, want, string(got), path)
+	}
+}
+
+func TestMigrateLocalActions_RejectsReusableWorkflowSymlinkEscape(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(dir, ".git"), 0o755))
+	workflowDir := filepath.Join(dir, ".github", "workflows")
+	require.NoError(t, os.MkdirAll(workflowDir, 0o755))
+	caller := filepath.Join(workflowDir, "selected.yml")
+	callerContent := []byte("jobs:\n  reuse:\n    uses: ./.github/workflows/reuse.yml\n")
+	require.NoError(t, os.WriteFile(caller, callerContent, 0o600))
+	outside := filepath.Join(t.TempDir(), "reuse.yml")
+	outsideContent := []byte("jobs:\n  build:\n    steps:\n      - uses: ./actions/foo\n")
+	require.NoError(t, os.WriteFile(outside, outsideContent, 0o600))
+	if err := os.Symlink(outside, filepath.Join(workflowDir, "reuse.yml")); err != nil {
+		t.Skipf("creating symlink: %v", err)
+	}
+
+	count, _, err := migrateLocalActions([]string{caller})
+
+	require.ErrorContains(t, err, "outside repository root")
+	assert.Zero(t, count)
+	gotCaller, err := os.ReadFile(caller)
+	require.NoError(t, err)
+	assert.Equal(t, callerContent, gotCaller)
+	gotOutside, err := os.ReadFile(outside)
+	require.NoError(t, err)
+	assert.Equal(t, outsideContent, gotOutside)
+}
+
 func TestVerifyLocalWithLocalActionsPreservesFiles(t *testing.T) {
 	for name, flags := range map[string][]string{
 		"default":                    nil,
