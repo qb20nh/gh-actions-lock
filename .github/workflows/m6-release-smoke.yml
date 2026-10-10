@@ -29,10 +29,10 @@ jobs:
       attestations: read
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      M6_TESTED_SHA: a23bb9b0d13aad17565ca53d8436f6959acaff6b
-      M6_TAG: m6-a23bb9b0d13aad17565ca53d8436f6959acaff6b
-      M6_RELEASE_ID: 409048665
-      M6_ASSET_SHA256: 444d2a528175d660619d1d2b77f688ef6243042ccff6f329ac720fbd59de2cd1
+      M6_TESTED_SHA: 2169abe6e476bdf58aa32105efcc2a2792fc92b3
+      M6_TAG: m6-2169abe6e476bdf58aa32105efcc2a2792fc92b3
+      M6_RELEASE_ID: 409109569
+      M6_ASSET_SHA256: 8fe885929ebfef92639f6b9da37378073291bf402808e2f6f9ec000e7893bc93
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -92,7 +92,8 @@ jobs:
           set -euo pipefail
           gh release view "$M6_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease \
             --jq '.isDraft and .isPrerelease' | jq -e 'select(. == true)' > /dev/null
-          cp test/runtime/evidence/2026-10-11-combo.md "$RUNNER_TEMP/m6-release/notes.md"
+          gh release view "$M6_TAG" --repo "$GITHUB_REPOSITORY" --json body --jq '.body' \
+            > "$RUNNER_TEMP/m6-release/notes.md"
           {
             printf '\n## Uploaded binary verification\n\n'
             printf '[Release asset smoke](%s/%s/actions/runs/%s) verified the Linux amd64 digest, build attestation, source commit, frozen graph, and missing-lock rejection.\n' \
