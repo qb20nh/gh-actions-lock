@@ -63,9 +63,11 @@ The workflow's ordinary `GITHUB_TOKEN` cannot administer the repository. Do not
 store an administrator token in the workflow to perform this setup.
 
 The fork now has an active default-branch ruleset, `protect` (ID `24848059`),
-with no bypass. Its required-check list is empty and strict up-to-date checking
-is disabled. Edit that existing ruleset under **Settings → Rules → Rulesets**;
-preserve its deletion, force-push, and pull-request rules. The script does not
+with no bypass. API readback confirms the four required checks listed below,
+bound to GitHub Actions, with no exception for branch creation. Strict
+up-to-date checking is still disabled. Enable **Require branches to be up to
+date before merging** under **Settings → Rules → Rulesets**; preserve its
+deletion, force-push, pull-request, and required-check rules. The script does not
 alter rulesets, so running it cannot complete this fork's activation.
 
 For a repository using classic branch protection, the prepared script supports:

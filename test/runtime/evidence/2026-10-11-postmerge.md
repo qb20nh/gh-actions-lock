@@ -69,13 +69,16 @@ remains a draft prerelease.
 The user created active [ruleset `protect`, ID 24848059](https://github.com/qb20nh/gh-actions-lock/rules/24848059)
 for `~DEFAULT_BRANCH`. Public API inspection confirms `main` is protected,
 with no bypass, deletion and force-push prevention, and required PRs with zero
-approvals. The inspected required-status list was empty and strict up-to-date
-checking was disabled. Those rules do not yet require passing validation.
+approvals. After the user saved required checks, API readback of the ruleset
+updated at 2026-10-11 03:08:05 KST confirms `Lock policy`, `go-test`,
+`integration-stub`, and `dependency-review`, each bound to GitHub Actions
+(integration ID `15368`). `do_not_enforce_on_create` is `false`, so branch
+creation does not bypass these checks.
 
-Edit this existing ruleset to require `Lock policy`, `go-test`,
-`integration-stub`, and `dependency-review` from GitHub Actions (app `15368`),
-and require branches to be up to date. Keep other existing rules.
-All four check names and their source are verified by the hosted controls;
+Strict up-to-date checking remains disabled:
+`strict_required_status_checks_policy` is `false`. Enable **Require branches to
+be up to date before merging** in this existing ruleset and retain its other
+rules. All four check names and their source are verified by hosted controls;
 `integration-live` remains advisory. The prepared classic branch-protection
 script adds only `Lock policy` and does not modify rulesets.
 
@@ -94,8 +97,9 @@ review currently handles only PRs.
 
 ## Remaining goal blockers
 
-- Required checks and strict branch freshness still need activation and
-  readback. Full-SHA policy and the exact allowlist are owner-confirmed but
+- Strict branch freshness still needs activation and readback. The four
+  required checks are confirmed by ruleset API readback. Full-SHA policy and
+  the exact allowlist are owner-confirmed but
   cannot yet be read back through the current connection. Applicable
   workflow-event policy also needs Administration access for inspection.
 - Upstream [#125](https://github.com/github/gh-actions-lock/issues/125) remains
