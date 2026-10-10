@@ -123,7 +123,7 @@ func (f *Finding) IsValid() bool {
 		return true
 	}
 	switch f.Category {
-	case Valid, RunOnly, LocalAction, RepoRenamed, ShaAsRef, RefMoved, VersionRef, OnboardingRequired, StaleWorkflow, SelfRepositoryAction, FreshTag, CooldownConfigIgnored:
+	case Valid, RunOnly, LocalAction, ShaAsRef, RefMoved, VersionRef, OnboardingRequired, StaleWorkflow, SelfRepositoryAction, FreshTag, CooldownConfigIgnored:
 		return true
 	case NotPinned:
 		return f.ActionRef == nil // workflow-level is a warning

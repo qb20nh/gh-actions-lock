@@ -139,6 +139,17 @@ the actual successful status list pass.
 
 All checks below passed after the final CLI changes:
 
+The subsequent P1/P2 review fixes also pass: [SHA-root parity tests](../cmd/gh-actions-lock/sha_parity_test.go)
+verify symbolic lock entries and their children for full-SHA uses;
+[rename tests](../cmd/gh-actions-lock/rename_verify_frozen_test.go) block read-only
+verification and remote transitive renames while preserving direct auto-fix;
+[Docker tests](../cmd/gh-actions-lock/verify_frozen_docker_test.go) reject job-level
+Docker references; and [recovery tests](../cmd/gh-actions-lock/lockrecovery_test.go)
+commit confirmed removal when a full scan finds no workflows. Each finding was
+reproduced before its fix. Formatting, vet, the complete race/release suite,
+five materializer tests, 14 protection/hook tests, and all 34 stub scenarios pass.
+[Local review log](/workspace/.cloud-setup/gh-actions-lock/review-p1-p2-checks.log).
+
 | Check | Result | Local execution log |
 | --- | --- | --- |
 | `make test` | Release tag selection/verification and `go test -race -count=1 ./...` pass. | [Race/release log](/workspace/.cloud-setup/gh-actions-lock/goal-final-test.log) |

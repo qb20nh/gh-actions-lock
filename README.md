@@ -38,11 +38,18 @@ After the initial run to onboard workflows, you will need to run `gh actions-loc
 
 A full-directory run (`gh actions-lock` with no path arguments) also prunes lockfile entries for workflows that have been deleted from `.github/workflows/`, dropping any dependencies left orphaned by the removal. Scoped runs that name specific workflows never prune out-of-scope entries.
 
+When no workflows remain, confirming corrupt-lock recovery during a full scan
+removes the obsolete lockfile through the normal guarded commit path.
+
 Locked pins are sticky: a normal run only re-resolves refs the lockfile does
 not record yet. It checks repository identity, commit existence, and whether
 full-version tags (e.g. `v4.2.1`) still point at the recorded commit, including
-transitive pins. A verified rename or transfer can update the repository name
-while preserving its commit. Failed identity or commit checks block updates.
+transitive pins, including full-SHA uses covered by symbolic lock keys. A verified
+direct rename or transfer can update the repository name while preserving its
+commit. Read-only verification rejects old names because
+[GitHub Actions does not support redirects](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/find-and-customize-actions);
+references inside remote dependencies require updating their
+parent. Failed identity or commit checks block updates.
 
 Rejected validation, resolution, and cooldown checks leave workflow, action,
 and lockfile contents unchanged, including otherwise valid workflows in the

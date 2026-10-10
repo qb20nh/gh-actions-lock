@@ -47,8 +47,8 @@ func TestParityFinding(t *testing.T) {
 		},
 		{
 			name: "transferred transitive dependency points at its parent", ref: "v2", parent: "octo/composite@v1",
-			state: ghapi.PinState{NameWithOwner: "typesafegithub/github-actions-typing", CommitFound: true},
-			want:  checks.RepoRenamed, wantWarn: true,
+			state:      ghapi.PinState{NameWithOwner: "typesafegithub/github-actions-typing", CommitFound: true},
+			want:       checks.RepoRenamed,
 			wantRemedy: "upgrade octo/composite@v1 to a version that uses typesafegithub/github-actions-typing",
 		},
 		{

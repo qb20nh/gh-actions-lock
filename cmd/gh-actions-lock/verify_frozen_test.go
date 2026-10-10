@@ -182,9 +182,10 @@ func TestVerifyLocalInventoryUsesActualDirectRefs(t *testing.T) {
 	}
 }
 
-func TestVerifyFrozenKeepsCoverageAcrossRepositoryRename(t *testing.T) {
+func TestVerifyFrozenRejectsRepositoryRenameWithoutLosingCoverage(t *testing.T) {
 	path := writeTempWorkflow(t, "jobs: {test: {runs-on: ubuntu-latest, steps: [{uses: krzema12/github-actions-typing@"+parityTestSHA+"}]}}\n", "krzema12/github-actions-typing@"+parityTestSHA+"=sha1-"+parityTestSHA)
 	require.NoError(t, os.Mkdir(".git", 0o755))
+	before := snapshotWorkflows(t)
 	registry := &httpmock.Registry{}
 	defer registry.Verify(t)
 	registry.Register(httpmock.GraphQL(`object\(expression`), httpmock.JSONResponse(map[string]any{
@@ -201,8 +202,10 @@ func TestVerifyFrozenKeepsCoverageAcrossRepositoryRename(t *testing.T) {
 		"data": map[string]any{"a0": state, "a1": state},
 	}))
 	payload, err := runParity(t, registry, "--verify-frozen", path)
-	require.NoError(t, err, "%+v", payload.Findings)
-	assert.True(t, payload.Valid)
+	require.ErrorIs(t, err, errSilent)
+	assert.False(t, payload.Valid)
+	assertFindingCategory(t, payload, "repo-renamed")
+	assert.Equal(t, before, snapshotWorkflows(t))
 	for _, finding := range payload.Findings {
 		assert.NotEqual(t, "not-pinned", finding.Category)
 	}

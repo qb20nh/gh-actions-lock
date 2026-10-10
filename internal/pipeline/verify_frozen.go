@@ -37,7 +37,7 @@ func verifyFrozen(ctx context.Context, opts RunOptions, parsed []checks.ParsedWo
 			}
 			for _, site := range definition.Uses() {
 				use := strings.TrimSpace(site.Value)
-				if strings.HasPrefix(use, "docker://") {
+				if site.StepLevel && strings.HasPrefix(use, "docker://") {
 					if !workflowfile.IsImmutableDockerRef(use) {
 						wr.Findings = append(wr.Findings, checks.Finding{
 							WorkflowPath: pw.Path,

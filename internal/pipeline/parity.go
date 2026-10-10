@@ -25,10 +25,10 @@ import (
 // transitive closure from this run's resolve) join the same batch. Any
 // blocking finding keeps its workflow out of the write.
 //
-// Identity follows the runner: only the repo ID counts. A rename or
-// transfer redirect to the same repo ID is a warning, also inside a
-// remote composite; a different ID or a name that doesn't resolve blocks. Fresh pins fail closed: an
-// inconclusive check keeps them out of the write.
+// A matching repo ID allows a direct rename to be rewritten without changing
+// its locked commit. Actions do not follow repository redirects, so a remote
+// transitive rename blocks writing until its parent is upgraded. Fresh pins
+// fail closed: an inconclusive check keeps them out of the write.
 func checkParity(ctx context.Context, r *resolve.Resolver, parsed []checks.ParsedWorkflow, store *lockfile.State, report *checks.Report, recordedKeys map[string]bool, resolved []dep.Dependency, parents map[string][]string, keep func(checks.Category) bool) {
 	gh := r.GHClient()
 	if gh == nil || store == nil {
@@ -73,9 +73,26 @@ func checkParity(ctx context.Context, r *resolve.Resolver, parsed []checks.Parse
 			continue
 		}
 		recorded, _ := pw.PartitionRefs()
-		direct := make(map[string]parserlock.ActionRef, len(recorded))
+		refsByKey := make(map[string]parserlock.ActionRef, len(recorded))
 		for _, r := range recorded {
-			direct[strings.ToLower(r.Owner+"/"+r.Repo)+"@"+r.Ref] = r
+			ref := r.Ref
+			if parserlock.IsFullSha(ref) {
+				ref = strings.ToLower(ref)
+			}
+			refsByKey[strings.ToLower(r.Owner+"/"+r.Repo)+"@"+ref] = r
+		}
+		// SHA uses retain the lock's symbolic key. Keep the workflow ref for
+		// findings and rewrites while selecting the recorded closure by that key.
+		direct := make(map[string]parserlock.ActionRef, len(recorded))
+		for _, d := range pw.RecordedDeps(recorded) {
+			nwo := strings.ToLower(d.NWO)
+			ref, ok := refsByKey[nwo+"@"+d.Ref]
+			if !ok {
+				ref, ok = refsByKey[nwo+"@"+strings.ToLower(d.SHA)]
+			}
+			if ok {
+				direct[nwo+"@"+d.Ref] = ref
+			}
 		}
 		live := func(p parserlock.Pin) bool {
 			_, ok := direct[strings.ToLower(p.Owner+"/"+p.Repo)+"@"+p.Ref]
@@ -253,13 +270,14 @@ func parityFinding(pw checks.ParsedWorkflow, ref parserlock.ActionRef, lp lockfi
 	case st.NameWithOwner != "" && !strings.EqualFold(st.NameWithOwner, nwo):
 		f.Category = checks.RepoRenamed
 		f.Severity = checks.SeverityWarning
-		f.Detail = fmt.Sprintf("%s was renamed or transferred to %s%s; the runner follows the redirect while the repo ID matches", nwo, st.NameWithOwner, via)
+		f.Detail = fmt.Sprintf("%s was renamed or transferred to %s%s; GitHub Actions does not support repository redirects", nwo, st.NameWithOwner, via)
 		uses := st.NameWithOwner
 		if ref.Path != "" {
 			uses += "/" + ref.Path
 		}
 		f.Remediation = fmt.Sprintf("run `gh actions-lock` to rewrite it as `uses: %s@%s`", uses, ref.Ref)
 		if f.ParentNWO != "" {
+			f.Severity = checks.SeverityError
 			f.Remediation = fmt.Sprintf("upgrade %s to a version that uses %s", f.ParentNWO, st.NameWithOwner)
 		}
 	default:

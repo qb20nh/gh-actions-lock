@@ -423,9 +423,8 @@ func renderWarnings(out *ui.UI, report *checks.Report, willRemediate bool) {
 }
 
 // renderRedirects lists pins whose repository was renamed or transferred
-// but kept its repo ID. The runner follows the redirect, so it's a warning
-// with the replacement `uses:` line. A fix run rewrites workflow refs and
-// reports that instead.
+// but kept its repo ID, with the replacement `uses:` line. A fix run rewrites
+// direct workflow refs and reports that instead.
 func renderRedirects(out *ui.UI, report *checks.Report, willRemediate bool) {
 	for _, wr := range report.Workflows {
 		for _, f := range wr.Findings {
@@ -437,9 +436,8 @@ func renderRedirects(out *ui.UI, report *checks.Report, willRemediate bool) {
 	}
 }
 
-// IsAlertedCategory reports whether a finding category has no auto-fix and
-// requires human investigation (already surfaced in PresentResults — the
-// remediator should not re-print it in non-interactive mode).
+// IsAlertedCategory reports findings already surfaced in PresentResults that
+// the remediator should not re-print in non-interactive mode.
 func IsAlertedCategory(c checks.Category) bool {
 	switch c {
 	case checks.UnreachablePin, checks.MisleadingSHA, checks.OnboardingRequired, checks.RepoRenamed, checks.RepoHijacked, checks.RepoUnavailable:

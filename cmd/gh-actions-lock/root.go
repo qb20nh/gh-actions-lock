@@ -203,13 +203,15 @@ func newRun(workflowPaths []string, hostname string, pool *pinpool.Pool, newReso
 		return lockfile.LoadState(".", meta)
 	}
 	store, err := loadStore(nil)
+	recovered := false
 	if err != nil {
 		if errors.Is(err, lockfile.ErrCorruptLockfile) && onCorrupt != nil {
 			lockPath := filepath.Join(".", parserlock.Path)
 			if workflowsDir != "" {
 				lockPath = filepath.Join(workflowsDir, "actions.lock")
 			}
-			recovered, rerr := onCorrupt(lockPath, err)
+			var rerr error
+			recovered, rerr = onCorrupt(lockPath, err)
 			if rerr != nil {
 				return nil, nil, nil, rerr
 			}
@@ -228,12 +230,9 @@ func newRun(workflowPaths []string, hostname string, pool *pinpool.Pool, newReso
 		}
 	}
 
-	// An empty full scan is only meaningful when the lockfile still records
-	// workflows to prune. With nothing on disk and nothing recorded, there's
-	// genuinely no work — keep the original "no workflow files" error, and
-	// emit it before auth so an empty repo doesn't complain about a missing
-	// token.
-	if len(paths) == 0 && len(store.WorkflowKeys()) == 0 {
+	// An empty full scan must commit a confirmed recovery or prune recorded
+	// workflows. Otherwise emit the "no workflow files" error before auth.
+	if len(paths) == 0 && len(store.WorkflowKeys()) == 0 && !recovered {
 		return nil, nil, nil, noWorkflowsError(workflowsDir)
 	}
 

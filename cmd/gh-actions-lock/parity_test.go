@@ -56,20 +56,23 @@ func transferParity(repoID int) httpmock.Responder {
 	})
 }
 
-// TestParity_TransferredRepoWarns is the #110 case under --verify: the
-// locked repository was transferred and kept its repo ID, so the runner
-// follows the redirect. The CLI warns with the replacement `uses:` line.
-func TestParity_TransferredRepoWarns(t *testing.T) {
-	reg := &httpmock.Registry{}
-	defer reg.Verify(t)
-	reg.Register(httpmock.GraphQL(`commit: object\(oid`), transferParity(1))
-	path := writeTempWorkflow(t, transferWorkflow, "krzema12/github-actions-typing@v2.2.2=sha1-"+parityTestSHA)
+func TestParity_TransferredRepoBlocksVerification(t *testing.T) {
+	for _, mode := range []string{"--verify", "--no-fix"} {
+		t.Run(mode, func(t *testing.T) {
+			reg := &httpmock.Registry{}
+			defer reg.Verify(t)
+			reg.Register(httpmock.GraphQL(`commit: object\(oid`), transferParity(1))
+			path := writeTempWorkflow(t, transferWorkflow, "krzema12/github-actions-typing@v2.2.2=sha1-"+parityTestSHA)
+			before := snapshotWorkflows(t)
 
-	_, stderr, err := runCommandWithHTTP(t, reg, "--verify", path)
-	require.NoError(t, err, stderr)
-	assert.Contains(t, stderr, "rewrite it as `uses: typesafegithub/github-actions-typing@v2.2.2`")
-	assert.Contains(t, stderr, path)
-	assert.Contains(t, stderr, "All 1 workflow valid")
+			_, stderr, err := runCommandWithHTTP(t, reg, mode, path)
+			require.ErrorIs(t, err, errSilent)
+			assert.Contains(t, stderr, "rewrite it as `uses: typesafegithub/github-actions-typing@v2.2.2`")
+			assert.Contains(t, stderr, path)
+			assert.NotContains(t, stderr, "All 1 workflow valid")
+			assert.Equal(t, before, snapshotWorkflows(t))
+		})
+	}
 }
 
 // TestParity_TransferredRepoRewrites: in fix mode a recorded same-ID
@@ -417,11 +420,7 @@ func TestParity_FirstRunTransferRewrites(t *testing.T) {
 	assert.Contains(t, readTempLockfilePins(t), "repo_id: 502427408")
 }
 
-// TestParity_RemoteCompositeTransferBlocks: a redirect inside a composite
-// TestParity_RemoteCompositeRenameKeepsName: a redirect inside a remote
-// composite can't be rewritten and the runner follows it while the repo ID
-// matches, so the child stays keyed as written and only --verify warns.
-func TestParity_RemoteCompositeRenameKeepsName(t *testing.T) {
+func TestParity_RemoteCompositeRenameBlocksFirstWrite(t *testing.T) {
 	reg := &httpmock.Registry{}
 	reg.Register(httpmock.GraphQLForRepo("acme", "comp"), httpmock.JSONResponse(map[string]any{
 		"data": map[string]any{"a0": testRepoResponse("acme/comp", parityTestMoved,
@@ -447,17 +446,13 @@ jobs:
       - uses: acme/comp@v1.0.0
 `)
 
+	before := snapshotWorkflows(t)
 	_, stderr, err := runCommandWithHTTP(t, reg, path)
-	require.NoError(t, err, stderr)
-	assert.NotContains(t, stderr, "upgrade acme/comp@v1.0.0", "fix runs stay quiet; --verify reports it")
-	lock := readTempLockfilePins(t)
-	assert.Contains(t, lock, "'krzema12/github-actions-typing@v2.2.2':")
-	assert.NotContains(t, lock, "typesafegithub")
-
-	reg.Register(httpmock.GraphQL(`commit: object\(oid`), renamedParity)
-	_, stderr, err = runCommandWithHTTP(t, reg, "--verify", path)
-	require.NoError(t, err, stderr)
+	require.ErrorIs(t, err, errSilent)
 	assert.Contains(t, stderr, "upgrade acme/comp@v1.0.0")
+	assert.Contains(t, stderr, "Nothing was written")
+	assert.Equal(t, before, snapshotWorkflows(t))
+	assert.NoFileExists(t, ".github/workflows/actions.lock")
 }
 
 // TestParity_FirstRunInconclusiveNotWritten: a fresh pin whose identity
