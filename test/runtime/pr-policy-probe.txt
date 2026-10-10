@@ -1,0 +1,1 @@
+PR policy binding probe: head and current merge revisions must both be validated.
