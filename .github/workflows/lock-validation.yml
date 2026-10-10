@@ -28,7 +28,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       LOCK_VERIFIER_REPOSITORY: qb20nh/gh-actions-lock
       # Trusted verifier with required-lock and defining-commit graph checks.
-      LOCK_VERIFIER_SHA: 568368f04df85de69e9194610f87c4f9af58b8bf
+      LOCK_VERIFIER_SHA: 9b555bd9098d762facaa3542978527c5a0d31b99
       LOCK_SOURCE_REPOSITORY: ${{ inputs.source-repository || github.repository }}
       LOCK_SOURCE_SHA: ${{ inputs.source-sha }}
       LOCK_WORKFLOW_PATH: ${{ inputs.workflow-path }}
