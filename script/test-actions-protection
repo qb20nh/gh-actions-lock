@@ -145,6 +145,52 @@ class ProtectionTests(unittest.TestCase):
                 protection.GitHub().api("repos/owner/repo")
         self.assertNotIn("should-never-be-printed", str(error.exception))
 
+    def test_other_branch_requires_a_deployed_stable_default_before_writes(self):
+        tested_sha = "b" * 40
+        default_sha = "c" * 40
+
+        class API:
+            def __init__(self, deployed, changed):
+                self.deployed = deployed
+                self.changed = changed
+                self.default_reads = 0
+                self.writes = []
+
+            def api(self, endpoint, method="GET", body=None):
+                if method != "GET":
+                    self.writes.append((method, endpoint, body))
+                    return None
+                if endpoint == "repos/owner/repo":
+                    return {"permissions": {"admin": True}, "private": False, "default_branch": "main"}
+                if endpoint.endswith("/branches/release"):
+                    return {"protected": False, "commit": {"sha": tested_sha}}
+                if endpoint.endswith("/branches/main"):
+                    self.default_reads += 1
+                    sha = "d" * 40 if self.changed and self.default_reads > 1 else default_sha
+                    return {"protected": False, "commit": {"sha": sha}}
+                if endpoint.endswith("/actions/permissions"):
+                    return {"enabled": True, "allowed_actions": "all"}
+                if "/contents/" in endpoint:
+                    if endpoint.endswith("ref=" + default_sha) and not self.deployed:
+                        raise protection.PolicyError("default branch policy is not deployed")
+                    return {"type": "file", "content": base64.b64encode(json.dumps(POLICY).encode()).decode()}
+                if "/status?" in endpoint:
+                    sha = default_sha if default_sha in endpoint else tested_sha
+                    return {"sha": sha, "statuses": [{"context": "Lock policy", "state": "success",
+                                                      "creator": {"login": "github-actions[bot]"}}]}
+                raise AssertionError(endpoint)
+
+        for name, deployed, changed in [("undeployed default", False, False), ("changed default", True, True)]:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / ".github").mkdir()
+                (root / protection.POLICY_PATH).write_text(json.dumps(POLICY))
+                api = API(deployed, changed)
+                with patch.object(protection, "ROOT", root), redirect_stdout(io.StringIO()):
+                    with self.assertRaisesRegex(protection.PolicyError, "default branch"):
+                        protection.main(["--repo", "owner/repo", "--branch", "release", "--apply"], github=api)
+                self.assertEqual(api.writes, [])
+
 
 @unittest.skipUnless(shutil.which("git") and shutil.which("go"), "hook checks need git and Go")
 class HookSnapshotTests(unittest.TestCase):
