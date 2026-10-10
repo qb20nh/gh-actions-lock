@@ -26,7 +26,7 @@ jobs:
       LOCK_VERIFIER_REPOSITORY: qb20nh/gh-actions-lock
       # Trusted verifier with required-lock and defining-commit graph checks.
       LOCK_VERIFIER_SHA: 568368f04df85de69e9194610f87c4f9af58b8bf
-      LOCK_EVENT_HEAD_SHA: ecca9970d5ecf0dd5c28679a5e18bab185542aea
+      LOCK_EVENT_HEAD_SHA: 65cb439565e74e11bcebb2ab94a39e5d679c1dcd
       LOCK_EVENT_HEAD_REPOSITORY: qb20nh/gh-actions-lock
       LOCK_WORKFLOW_SHA: ${{ github.workflow_sha }}
     steps:
