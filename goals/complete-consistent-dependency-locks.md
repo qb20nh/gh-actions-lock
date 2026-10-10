@@ -2,12 +2,13 @@
 
 Deliver reviewable fixes so verification reports dependency coverage accurately, successful updates preserve workflow semantics, and rejected validation, resolution, or policy checks leave workflow and lock files unchanged.
 
-- **Repository:** [github/gh-actions-lock](https://github.com/github/gh-actions-lock)
+- **Repository:** [qb20nh/gh-actions-lock](https://github.com/qb20nh/gh-actions-lock), a personal fork of [github/gh-actions-lock](https://github.com/github/gh-actions-lock).
+- **Delivery scope:** Personal use. No upstream contribution is planned; upstream issue references track external platform limitations.
 - **Assessment baseline:** `3f7c302310dde7556291a2ce0792de36ec41a4c8`
-- **Status:** CLI implementation and the repository-controlled #125 workaround are merged into the fork and tested. Default-branch validation, actual PR events, the merged-source draft release, and four required GitHub Actions checks with strict branch freshness are proven. Full-SHA policy and the allowlist are owner-confirmed. M6 remains open for Actions administration readback and upstream runtime rejection.
+- **Status:** CLI implementation and the repository-controlled #125 workaround are merged into the fork and tested. Default-branch validation, actual PR events, the merged-source draft release, and four required GitHub Actions checks with strict branch freshness are proven. Full-SHA policy, the allowlist, and the workflow-event policy are owner-confirmed. M6 remains open for independent Actions administration readback and the original platform-rejection criterion for #125.
 - **Progress:** 5 of 6 milestones complete.
 - **Last validated:** 2026-10-11 KST.
-- **Delivery:** [Merged implementation PR](https://github.com/qb20nh/gh-actions-lock/pull/2), fork main `2169abe6e476bdf58aa32105efcc2a2792fc92b3`, [12 attested draft binaries from that merged source](https://github.com/qb20nh/gh-actions-lock/releases/tag/untagged-88bcef74c4ff66093ea3), and [post-merge validation evidence](../test/runtime/evidence/2026-10-11-postmerge.md). Earlier candidate evidence remains recorded below. Upstream merge and stable publication are separate.
+- **Delivery:** [Merged implementation PR #2](https://github.com/qb20nh/gh-actions-lock/pull/2), [merged evidence/protection PR #4](https://github.com/qb20nh/gh-actions-lock/pull/4), and validated main revision `b258e96524e81453878e071e8a5cef2d4b214aba`. [12 attested draft binaries](https://github.com/qb20nh/gh-actions-lock/releases/tag/untagged-88bcef74c4ff66093ea3) were built from implementation merge `2169abe6e476bdf58aa32105efcc2a2792fc92b3`; [post-merge validation evidence](../test/runtime/evidence/2026-10-11-postmerge.md) records exact sources. Earlier candidate evidence remains recorded below. Stable publication is separate.
 - **Execution order:** M1 → M2 → M3 → M4 → M5 → M6.
 
 ## Milestones
@@ -113,7 +114,8 @@ Deliver reviewable fixes so verification reports dependency coverage accurately,
   - [x] Enable strict up-to-date checks in that ruleset: API readback confirms `strict_required_status_checks_policy: true`, with all four checks retained and no bypass or branch-creation exception.
   - [x] Enable full-SHA action policy: the user confirms **Require actions to be pinned to a full-length commit SHA** is checked. Administration API readback remains unavailable.
   - [x] Enable the exact eight-entry allowlist: the user confirms the supplied policy was saved. Administration API readback remains unavailable.
-  - [ ] Inspect applicable workflow-event policy and read back Actions settings. Current connector/shell capabilities cannot administer or inspect these settings.
+  - [x] Configure the workflow-event policy: the user saved [policy 7089](https://github.com/qb20nh/gh-actions-lock/settings/actions/rules/7089) after the Active-policy setup for `.github/workflows/lock-policy.yml`, allowing `pull_request_target`, `push`, `workflow_dispatch`, and `merge_group`. This is owner confirmation, not independent API readback.
+  - [ ] Independently read back the SHA requirement, selected-action allowlist, and workflow-event policy. Current connector/shell capabilities cannot inspect these Administration endpoints; the policy fetch rejection is a connection limitation, not evidence of a configuration failure.
   - Hosted merge-group delivery is not applicable to this personal fork; GitHub requires an eligible organization repository. Retain the handler and require every check to handle merge groups before enabling a queue elsewhere.
   - [x] Confirm the fork's dependency-review API is available: the [rerun](https://github.com/qb20nh/gh-actions-lock/actions/runs/38066247251) passed both its lock gate and dependency review after the initial 403.
   - [ ] Re-run platform malformed-lock rejection after the upstream #125 fix; require an explicit lock error and no execution sentinel.
@@ -122,7 +124,7 @@ Deliver reviewable fixes so verification reports dependency coverage accurately,
 
   | Upstream reference | Effect on release scope | Completion evidence |
   | --- | --- | --- |
-  | [#125 — malformed lock ignored at runtime](https://github.com/github/gh-actions-lock/issues/125) | Reproduced on the hosted service. The repository-controlled combo rejects bad locks before covered consumers execute; activation and platform YAML rejection remain open. | Deploy protections, then re-run the original syntax-negative control after the upstream fix; require an explicit service lock error and no sentinel execution. |
+  | [#125 — malformed lock ignored at runtime](https://github.com/github/gh-actions-lock/issues/125) | Reproduced on the hosted service. The repository-controlled combo rejects bad locks before covered consumers execute; protection activation is recorded, while independent Actions-settings readback and native platform YAML rejection remain open. | Read back Actions settings when an Administration-capable connection is available, then re-run the original syntax-negative control after the platform fix; require an explicit service lock error and no sentinel execution. |
   | [#126 — cross-repository `$/` execution failure](https://github.com/github/gh-actions-lock/issues/126) | Positive probes pass on the recorded deployment; migration remains opt-in because workspace semantics can differ. | Met for this deployment: same/foreign actions and nested reusable workflows bind to the defining commit on hosted runner `2.337.0`. |
   | [#128 — generated local Docker action](https://github.com/github/gh-actions-lock/issues/128), [pypa #425](https://github.com/pypa/gh-action-pypi-publish/issues/425) | Generated workspace actions remain incomplete coverage and cannot be onboarded as complete locks. | Upstream exposes deterministic dependency metadata or defines a supported generated-action model; add discovery and coverage regressions before changing support claims. |
 
@@ -183,6 +185,6 @@ Hosted required checks and runtime smoke results are recorded in the [M6 evidenc
 
 ## Completion and follow-ups
 
-The goal is complete when all six milestones meet their acceptance criteria and no unresolved release-blocking CLI defect remains within this scope. Track progress by checking off each milestone and linking its changes and validation evidence. Publishing or merging upstream is a separate action.
+The goal is complete when all six milestones meet their acceptance criteria and no unresolved release-blocking CLI defect remains within this scope. Track progress by checking off each milestone and linking its changes and validation evidence. Upstream contribution is outside this personal-use scope. Publishing a stable release is a separate action.
 
 Follow-up goals cover repository configuration ([#133](https://github.com/github/gh-actions-lock/issues/133), [#134](https://github.com/github/gh-actions-lock/issues/134)), caller-local hooks ([#138](https://github.com/github/gh-actions-lock/issues/138)), and an upgrade command ([#140](https://github.com/github/gh-actions-lock/issues/140)). Build these on the corrected discovery, mutation, and policy behavior.
