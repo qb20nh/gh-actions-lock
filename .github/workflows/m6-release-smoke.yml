@@ -29,10 +29,10 @@ jobs:
       attestations: read
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      M6_TESTED_SHA: 34c65ecf262f580f066bf1d105a2ecc310226374
-      M6_TAG: m6-34c65ecf262f580f066bf1d105a2ecc310226374
-      M6_RELEASE_ID: 408980287
-      M6_ASSET_SHA256: 0281e7f65c40b38f799d6392b185274b737a12a4163362a2390c6468c942276e
+      M6_TESTED_SHA: a23bb9b0d13aad17565ca53d8436f6959acaff6b
+      M6_TAG: m6-a23bb9b0d13aad17565ca53d8436f6959acaff6b
+      M6_RELEASE_ID: 409048665
+      M6_ASSET_SHA256: 444d2a528175d660619d1d2b77f688ef6243042ccff6f329ac720fbd59de2cd1
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -70,20 +70,32 @@ jobs:
           chmod +x "$RUNNER_TEMP/m6-release/linux-amd64"
           "$RUNNER_TEMP/m6-release/linux-amd64" --version
           "$RUNNER_TEMP/m6-release/linux-amd64" --help > /dev/null
-          "$RUNNER_TEMP/m6-release/linux-amd64" --verify-local --json=valid,findings \
-            .github/workflows/m6-validation.yml .github/workflows/m6-release-smoke.yml \
+          "$RUNNER_TEMP/m6-release/linux-amd64" --require-lockfile --verify-frozen --json=valid,findings \
             > "$RUNNER_TEMP/m6-release/verification.json"
           jq -e '.valid == true' "$RUNNER_TEMP/m6-release/verification.json"
+      - name: Confirm released verifier rejects a missing lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/m6-missing-lock/.github/workflows"
+          cd "$RUNNER_TEMP/m6-missing-lock"
+          git init -q
+          printf 'name: Missing lock control\non: push\njobs:\n  shell:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n' \
+            > .github/workflows/shell.yml
+          if "$RUNNER_TEMP/m6-release/linux-amd64" --require-lockfile --verify-local; then
+            echo 'error: released verifier accepted a missing lock' >&2
+            exit 1
+          fi
       - name: Attach runtime evidence to draft notes
         shell: bash
         run: |
           set -euo pipefail
           gh release view "$M6_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease \
             --jq '.isDraft and .isPrerelease' | jq -e 'select(. == true)' > /dev/null
-          cp test/runtime/evidence/2026-10-10.md "$RUNNER_TEMP/m6-release/notes.md"
+          cp test/runtime/evidence/2026-10-11-combo.md "$RUNNER_TEMP/m6-release/notes.md"
           {
             printf '\n## Uploaded binary verification\n\n'
-            printf '[Release asset smoke](%s/%s/actions/runs/%s) verified the Linux amd64 digest, build attestation, source commit, and offline workflow coverage.\n' \
+            printf '[Release asset smoke](%s/%s/actions/runs/%s) verified the Linux amd64 digest, build attestation, source commit, frozen graph, and missing-lock rejection.\n' \
               "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
           } >> "$RUNNER_TEMP/m6-release/notes.md"
           gh release edit "$M6_TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$RUNNER_TEMP/m6-release/notes.md"
@@ -91,6 +103,6 @@ jobs:
             printf '### M6 uploaded binary verification\n\n'
             printf 'Tested source commit: `%s`\n\n' "$M6_TESTED_SHA"
             printf 'Asset digest: `sha256:%s`\n\n' "$M6_ASSET_SHA256"
-            printf 'Passed: digest, attestation, source binding, binary execution, and offline workflow coverage.\n\n'
+            printf 'Passed: digest, attestation, source binding, binary execution, frozen graph, and missing-lock rejection.\n\n'
             printf 'M6 remains blocked on upstream #125: malformed lock YAML was ignored at runtime.\n'
           } >> "$GITHUB_STEP_SUMMARY"
