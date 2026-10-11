@@ -2,6 +2,12 @@
 
 Lock your workflow dependencies.
 
+This is `qb20nh`'s personal fork of
+[`github/gh-actions-lock`](https://github.com/github/gh-actions-lock), with
+additional dependency verification and repository-controlled CI gates.
+Start with [Use this fork in another repository](./docs/using-this-fork.md) for
+installation, lock updates, CI examples, and the malformed-lock workarounds.
+
 > [!WARNING]
 > **Technical Preview.** gh-actions-lock is pre-1.0 and under active development. The
 > lockfile format, command flags, and behavior may change without notice between
@@ -11,17 +17,28 @@ Lock your workflow dependencies.
 
 gh-actions-lock is part of GitHub's Workflow Dependency Pinning effort. It records verified commits for workflow dependencies in a lockfile for compatible runners and Actions services to enforce. Development is ongoing and behavior may still change.
 
-Contributions are welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) to get started.
+Development instructions are in [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## Requirements
 
 GitHub Enterprise Server (GHES) is not supported.
 
-Requires the [`gh` CLI](https://cli.github.com/). Install it first, then install the extension:
+Requires Git, the [`gh` CLI](https://cli.github.com/), and Go 1.25.8 or newer for
+source installation. The fork's releases are currently drafts. On macOS/Linux:
 
 ```bash
-gh extension install github/gh-actions-lock
+gh auth login --hostname github.com
+gh repo clone qb20nh/gh-actions-lock
+cd gh-actions-lock
+git checkout b258e96524e81453878e071e8a5cef2d4b214aba
+go build -o gh-actions-lock ./cmd/gh-actions-lock
+gh extension install .
 ```
+
+Remove an existing `actions-lock` extension before installing this local copy,
+and keep the clone in place. The [fork usage guide](./docs/using-this-fork.md#1-install-the-fork)
+covers upgrades and Windows. Then run the commands below from the target
+repository's checkout.
 
 ## Usage
 
@@ -223,8 +240,10 @@ exact PR head and merge revisions and posts the `Lock policy` status. Remote
 references use full SHAs, including the vendored release composite's children.
 The staged pre-commit hook, ownership rules, exact external allowlist, and
 repository setup script are described in [Actions lock protections](./docs/actions-protection.md).
-Repository administration settings have not yet been applied; upstream #125
-remains open.
+The fork's branch ruleset is verified and its Actions settings are
+owner-confirmed; upstream #125 remains open. Each target repository needs its
+own gates, allowlist, and protections. Follow the
+[deployment walkthrough](./docs/using-this-fork.md#4-deploy-the-protected-policy-workaround).
 
 ## How it works
 
@@ -261,8 +280,11 @@ This project is licensed under the terms of the MIT open source license. See [LI
 
 ## Maintainers
 
-gh-actions-lock is maintained by @github/actions-dispatch-reviewers. See [CODEOWNERS](./CODEOWNERS).
+This fork is maintained for personal use by @qb20nh. See
+[fork ownership](./.github/CODEOWNERS). The upstream project is maintained by
+@github/actions-dispatch-reviewers.
 
 ## Support
 
-Support is best-effort and community-based. Please file bugs and feature requests as [GitHub issues](https://github.com/github/gh-actions-lock/issues). See [SUPPORT.md](./SUPPORT.md) for details.
+Support for this personal fork is best-effort. Report fork-specific bugs in
+[this repository's issues](https://github.com/qb20nh/gh-actions-lock/issues).
