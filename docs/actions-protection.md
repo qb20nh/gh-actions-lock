@@ -1,5 +1,9 @@
 # Actions lock protections
 
+For installation and deployment in an application repository, start with
+[Use this fork in another repository](using-this-fork.md). This page records
+the fork's settings, verification evidence, and trust boundaries.
+
 GitHub currently ignores syntactically malformed lock YAML in the reproduced
 upstream [#125](https://github.com/github/gh-actions-lock/issues/125) case.
 The workflows fetch the exact candidate revision and read its raw Git blobs in a
@@ -29,7 +33,9 @@ The reviewed allowlist is [.github/actions-policy.json](../.github/actions-polic
 It must include every external action, composite subaction, and reusable workflow
 reference in the frozen graph, with its complete path and full SHA. Updating
 dependencies requires reviewing and deploying the updated policy as well.
-The current eight entries match the regenerated lock closure. The
+The current eight entries match this fork's regenerated lock closure. Another
+repository needs its own reviewed list; the administration helper does not
+derive it from the dependency graph. The
 `actions/attest-build-provenance/predicate@36fa7d0…` entry retains the subaction
 path from its [immutable parent manifest](https://github.com/actions/attest-build-provenance/blob/ef244123eb79f2f7a7e75d99086184180e6d0018/action.yml);
 the lock's repository key alone loses that path.
@@ -194,6 +200,11 @@ definitions can also replace their checks. Binding a required status to the
 GitHub Actions app does not distinguish two workflows using that app.
 
 ## Enable local validation
+
+The bundled hook is for this tool's source repository: it builds the verifier
+from staged `./cmd/gh-actions-lock` source. An application repository needs an
+adapted hook using a separately installed, reviewed verifier; see the
+[usage guide](using-this-fork.md#5-maintain-locks-and-verify-locally).
 
 ```sh
 git config --local core.hooksPath .githooks
